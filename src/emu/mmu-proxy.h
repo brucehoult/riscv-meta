@@ -18,7 +18,7 @@ namespace riscv {
 
 		void print_memory_map() {}
 
-		proxy_memory() : segments(), heap_begin(0), heap_end(0), log(false) {}
+		proxy_memory() : segments(), heap_begin(0), heap_end(0), brk(0), log(false) {}
 	};
 
 	template <typename UX, typename MEMORY = proxy_memory<UX>>
@@ -26,16 +26,18 @@ namespace riscv {
 	{
 		/*
 		 * Define top of emulator address space, beginning of emulator text.
-		 * Note: due to memory model limitations the executable is linked below 2GB.
 		 *
-		 * MACOS_LDFLAGS = -Wl,-pagezero_size,0x1000 -Wl,-no_pie -image_base 0x40000000
-		 * LINUX_LDFLAGS = -Wl,--section-start=.text=0x40000000 -static
+		 * MACOS_LDFLAGS = -Wl,-pagezero_size,0x1000 -Wl,-no_pie -image_base 0x7ffe00000000
+		 * LINUX_LDFLAGS = -pie -fPIE -Wl,-Ttext-segment=0x7ffe00000000
 		 */
+
+		static const bool enfore_memory_top = false;
 
 		typedef std::shared_ptr<MEMORY> memory_type;
 
 		enum : addr_t {
-			memory_top = 0x40000000
+			memory_top = (sizeof(UX) == 4 ? 0x80000000 : 0x7f0000000000),
+			stack_size = 0x100000 // 1 MiB
 		};
 
 		memory_type mem;
@@ -77,12 +79,20 @@ namespace riscv {
 
 		template <typename P, typename T> void load(P &proc, UX va, T &val)
 		{
-			val = UX(*(T*)addr_t(va & (memory_top - 1)));
+			if (enfore_memory_top) {
+				val = UX(*(T*)addr_t(va & (memory_top - 1)));
+			} else {
+				val = UX(*(T*)addr_t(va));
+			}
 		}
 
 		template <typename P, typename T> void store(P &proc, UX va, T val)
 		{
-			*((T*)addr_t(va & (memory_top - 1))) = val;
+			if (enfore_memory_top) {
+				*((T*)addr_t(va & (memory_top - 1))) = val;
+			} else {
+				*((T*)addr_t(va)) = val;
+			}
 		}
 	};
 

@@ -26,10 +26,13 @@
 #include <deque>
 #include <map>
 #include <thread>
+#include <mutex>
+#include <chrono>
+#include <condition_variable>
 #include <atomic>
 #include <type_traits>
 
-#include <sparsehash/dense_hash_map>
+#include "dense_hash_map"
 
 #include <poll.h>
 #include <fcntl.h>
@@ -38,8 +41,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
-
-#include "histedit.h"
 
 #include "host-endian.h"
 #include "types.h"
@@ -66,7 +67,7 @@
 #include "processor-logging.h"
 #include "processor-base.h"
 #include "processor-impl.h"
-#include "user-memory.h"
+#include "mmu-memory.h"
 #include "tlb-soft.h"
 #include "mmu-soft.h"
 #include "interp.h"
@@ -85,6 +86,7 @@
 #include "device-gpio.h"
 #include "device-rand.h"
 #include "device-htif.h"
+#include "processor-histogram.h"
 #include "processor-priv-1.9.h"
 #include "debug-cli.h"
 #include "processor-runloop.h"
@@ -139,13 +141,14 @@ struct rv_emulator
 	static const uintmax_t default_ram_size = 0x40000000ULL; /* 1GiB */
 
 	elf_file elf;
-	std::string boot_filename;
 	host_cpu &cpu;
 	int proc_logs = 0;
 	bool help_or_error = false;
 	addr_t map_physical = 0;
 	s64 ram_boot = 0;
 	uint64_t initial_seed = 0;
+	std::string boot_filename;
+	std::string stats_dirname;
 
 	std::vector<std::string> host_cmdline;
 	std::vector<std::string> host_env;
@@ -191,6 +194,11 @@ struct rv_emulator
 			panic("map_executable: error: mmap: %s: %s", filename, strerror(errno));
 		}
 
+		/* zero bss */
+		if ((phdr.p_flags & PF_W) && phdr.p_memsz > phdr.p_filesz) {
+			memset((void*)((uintptr_t)addr + phdr.p_filesz), 0, phdr.p_memsz - phdr.p_filesz - 1);
+		}
+
 		/* add the mmap to the emulator soft_mmu */
 		proc.mmu.mem->add_mmap(map_vaddr, addr_t(addr), map_len,
 			pma_type_main | elf_pma_flags(phdr.p_flags));
@@ -230,12 +238,21 @@ struct rv_emulator
 			{ "-t", "--log-traps", cmdline_arg_type_none,
 				"Log Traps",
 				[&](std::string s) { return (proc_logs |= proc_log_trap); } },
-			{ "-H", "--register-usage-histogram", cmdline_arg_type_none,
-				"Record register usage",
-				[&](std::string s) { return (proc_logs |= proc_log_hist_reg); } },
+			{ "-E", "--log-exit-stats", cmdline_arg_type_none,
+				"Log Registers and Statistics at Exit",
+				[&](std::string s) { return (proc_logs |= proc_log_exit_log_stats); } },
+			{ "-D", "--save-exit-stats", cmdline_arg_type_string,
+				"Save Registers and Statistics at Exit",
+				[&](std::string s) { stats_dirname = s; return (proc_logs |= proc_log_exit_save_stats); } },
 			{ "-P", "--pc-usage-histogram", cmdline_arg_type_none,
 				"Record program counter usage",
 				[&](std::string s) { return (proc_logs |= proc_log_hist_pc); } },
+			{ "-R", "--register-usage-histogram", cmdline_arg_type_none,
+				"Record register usage",
+				[&](std::string s) { return (proc_logs |= proc_log_hist_reg); } },
+			{ "-I", "--instruction-usage-histogram", cmdline_arg_type_none,
+				"Record instruction usage",
+				[&](std::string s) { return (proc_logs |= proc_log_hist_inst); } },
 			{ "-d", "--debug", cmdline_arg_type_none,
 				"Start up in debugger",
 				[&](std::string s) { return (proc_logs |= proc_log_ebreak_cli); } },
@@ -287,9 +304,9 @@ struct rv_emulator
 			}
 		}
 
-		/* load ELF (headers only) */
+		/* load ELF */
 		if (ram_boot == 0) {
-			elf.load(boot_filename, true);
+			elf.load(boot_filename, elf_load_headers);
 		}
 	}
 
@@ -304,6 +321,7 @@ struct rv_emulator
 		P proc;
 		proc.log = proc_logs;
 		proc.mmu.mem->log = (proc.log & proc_log_memory);
+		proc.stats_dirname = stats_dirname;
 
 		/* randomise integer register state with 512 bits of entropy */
 		proc.seed_registers(cpu, initial_seed, 512);

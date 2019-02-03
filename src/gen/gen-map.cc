@@ -3,7 +3,7 @@
 //
 
 #include <cstdio>
-#include <sstream>
+#include <cstdlib>
 #include <functional>
 #include <algorithm>
 #include <memory>
@@ -72,7 +72,7 @@ static std::string colorize_operands(rv_gen *gen, rv_opcode_ptr opcode)
 		auto operand = gen->operands_by_name[comp];
 		if (operand) {
 			auto new_comp = rv_colors_to_ansi_escape_sequence(
-				operand->fg_color, operand->bg_color, ansi_color_normal
+				operand->fg_color(), operand->bg_color(), ansi_color_normal
 			);
 			new_comp.append(comp);
 			new_comp.append(_COLOR_RESET);
@@ -126,10 +126,10 @@ static void print_map(rv_gen *gen)
 				default:
 				{
 					rv_operand_ptr operand = opcode->find_operand(bit);
-					if (operand) {
+					if (operand && opcode->name[0] != '@') {
 						printf("%s%s%s",
 							enable_colorize ? rv_colors_to_ansi_escape_sequence(
-								operand->fg_color, operand->bg_color
+								operand->fg_color(), operand->bg_color()
 							).c_str() : "",
 							operand->char_code().c_str(),
 							enable_colorize ? _COLOR_RESET : "");

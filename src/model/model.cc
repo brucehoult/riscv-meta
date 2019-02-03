@@ -5,10 +5,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
-#include <iomanip>
-#include <sstream>
-#include <fstream>
 #include <algorithm>
 #include <functional>
 #include <limits>
@@ -32,10 +28,13 @@ static const char* CODECS_FILE                = "codecs";
 static const char* EXTENSIONS_FILE            = "extensions";
 static const char* REGISTERS_FILE             = "registers";
 static const char* CSRS_FILE                  = "csrs";
+static const char* CSR_FIELDS_FILE            = "csr-fields";
 static const char* OPCODES_FILE               = "opcodes";
 static const char* CONSTRAINTS_FILE           = "constraints";
 static const char* COMPRESSION_FILE           = "compression";
 static const char* PSEUDO_FILE                = "pseudos";
+static const char* OPCODE_MAJORS_FILE         = "opcode-majors";
+static const char* OPCODE_CLASSES_FILE        = "opcode-classes";
 static const char* OPCODE_FULLNAMES_FILE      = "opcode-fullnames";
 static const char* OPCODE_DESCRIPTIONS_FILE   = "opcode-descriptions";
 static const char* OPCODE_PSEUDOCODE_C_FILE   = "opcode-pseudocode-c";
@@ -91,11 +90,12 @@ const rv_primitive_type* rv_lookup_primitive_by_meta_type(std::string meta_type,
 template <typename T>
 std::string join(std::vector<T> list, std::string sep)
 {
-	std::stringstream ss;
+	std::string s;
 	for (auto i = list.begin(); i != list.end(); i++) {
-		ss << (i != list.begin() ? sep : "") << *i;
+		if (i != list.begin()) s.append(sep);
+		s.append(*i);
 	}
-	return ss.str();
+	return s;
 }
 
 int64_t rv_parse_value(const char* valstr)
@@ -131,12 +131,13 @@ rv_bitrange::rv_bitrange(std::string bitrange)
 
 std::string rv_bitrange::to_string(std::string sep, bool collapse_single_bit_range)
 {
-	std::stringstream ss;
-	ss << msb;
+	std::string s;
+	s.append(std::to_string(msb));
 	if (!collapse_single_bit_range || msb != lsb) {
-		ss << sep << lsb;
+		s.append(sep);
+		s.append(std::to_string(lsb));
 	}
-	return ss.str();
+	return s;
 }
 
 rv_bitspec::rv_bitspec(std::string bitspec)
@@ -193,17 +194,18 @@ size_t rv_bitspec::decoded_msb()
 
 std::string rv_bitspec::to_string()
 {
-	std::stringstream ss;
+	std::string s;
 	for (auto si = segments.begin(); si != segments.end(); si++) {
-		if (si != segments.begin()) ss << ",";
-		ss << si->first.to_string(":") << "[";
+		if (si != segments.begin()) s.append(",");
+		s.append(si->first.to_string(":"));
+		s.append("[");
 		for (auto ti = si->second.begin(); ti != si->second.end(); ti++) {
-			if (ti != si->second.begin()) ss << "|";
-			ss << ti->to_string(":");
+			if (ti != si->second.begin()) s.append("|");
+			s.append(ti->to_string(":"));
 		}
-		ss << "]";
+		s.append("]");
 	}
-	return ss.str();
+	return s;
 }
 
 std::string rv_bitspec::to_template()
@@ -218,23 +220,31 @@ std::string rv_bitspec::to_template()
 			}
 		}
 	}
-	std::stringstream ss;
-	ss << "<" << (msb + 1) << ", ";
+	std::string s;
+	s.append("<");
+	s.append(std::to_string(msb + 1));
+	s.append(", ");
 	for (auto si = segments.begin(); si != segments.end(); si++) {
-		if (si != segments.begin()) ss << ", ";
-		ss << "S<" << si->first.to_string(",", false) << ", ";
+		if (si != segments.begin()) s.append(", ");
+		s.append("S<");
+		s.append(si->first.to_string(",", false));
+		s.append(", ");
 		if (si->second.size() == 0) {
-			ss << "B<" << (si->first.msb - si->first.lsb) << ",0>";
+			s.append("B<");
+			s.append(std::to_string(si->first.msb - si->first.lsb));
+			s.append(",0>");
 		} else {
 			for (auto ti = si->second.begin(); ti != si->second.end(); ti++) {
-				if (ti != si->second.begin()) ss << ",";
-				ss << "B<" << ti->to_string(",") << ">";
+				if (ti != si->second.begin()) s.append(",");
+				s.append("B<");
+				s.append(ti->to_string(","));
+				s.append(">");
 			}
 		}
-		ss << ">";
+		s.append(">");
 	}
-	ss << ">";
-	return ss.str();
+	s.append(">");
+	return s;
 }
 
 const ssize_t rv_meta_model::DEFAULT = std::numeric_limits<ssize_t>::max();
@@ -246,7 +256,7 @@ rv_opcode_mask rv_meta_model::decode_mask(std::string bit_spec)
 		panic("bit range %s must be in form n..m=v\n", bit_spec.c_str());
 	}
 	std::vector<std::string> rpart = split(spart[0], "..");
-	ssize_t msb, lsb, val;
+	ssize_t msb = 0, lsb = 0, val = 0;
 	if (rpart.size() == 1) {
 		msb = lsb = strtoul(rpart[0].c_str(), nullptr, 10);
 	} else if (rpart.size() == 2) {
@@ -262,6 +272,36 @@ rv_opcode_mask rv_meta_model::decode_mask(std::string bit_spec)
 	}
 
 	return rv_opcode_mask(rv_bitrange(msb, lsb), val);
+}
+
+rv_version rv_meta_model::decode_version(std::string version, rv_version default_version)
+{
+	std::vector<std::string> vpart = split(version, ".");
+	if (vpart.size() == 1 && vpart[0].size() > 0) {
+		return rv_version(strtoul(vpart[0].c_str(), nullptr, 10));
+	} else if (vpart.size() == 2) {
+		return rv_version(strtoul(vpart[0].c_str(), nullptr, 10),
+			strtoul(vpart[1].c_str(), nullptr, 10), 0);
+	} else if (vpart.size() == 3) {
+		return rv_version(strtoul(vpart[0].c_str(), nullptr, 10),
+			strtoul(vpart[1].c_str(), nullptr, 10),
+			strtoul(vpart[2].c_str(), nullptr, 10));
+	}
+	return default_version;
+}
+
+rv_version_spec rv_meta_model::decode_version_spec(std::string version_spec)
+{
+	std::vector<std::string> spart = split(split(version_spec, ",")[0], "-");
+	if (spart.size() == 1) {
+		rv_version start_end = decode_version(spart[0], rv_version(0));
+		return rv_version_spec(start_end, start_end);
+	} else if (spart.size() >= 2) {
+		return rv_version_spec(decode_version(spart[0], rv_version(0)),
+			decode_version(spart[1], rv_version(std::numeric_limits<int>::max())));
+	} else {
+		return rv_version_spec(rv_version(0), rv_version(0));
+	}
 }
 
 std::vector<rv_bitrange> rv_meta_model::bitmask_to_bitrange(std::vector<ssize_t> &bits)
@@ -283,7 +323,7 @@ std::vector<rv_bitrange> rv_meta_model::bitmask_to_bitrange(std::vector<ssize_t>
 std::string rv_meta_model::format_bitmask(std::vector<ssize_t> &bits, std::string var, bool comment)
 {
 	std::vector<rv_bitrange> v = bitmask_to_bitrange(bits);
-	std::stringstream ss;
+	std::string s;
 
 	ssize_t total_length = bits.size();
 	ssize_t range_start = bits.size();
@@ -292,38 +332,38 @@ std::string rv_meta_model::format_bitmask(std::vector<ssize_t> &bits, std::strin
 		rv_bitrange r = *ri;
 		ssize_t range_end = range_start - (r.msb - r.lsb);
 		ssize_t shift = r.msb - range_start + 1;
-		if (ri != v.begin()) ss << " | ";
-		ss << "((" << var << " >> " << shift << ") & 0b";
+		if (ri != v.begin()) s.append(" | ");
+		s.append("((");
+		s.append(var);
+		s.append(" >> ");
+		s.append(std::to_string(shift));
+		s.append(") & 0b");
 		for (ssize_t i = total_length; i > 0; i--) {
-			if (i <= range_start && i >= range_end) ss << "1";
-			else ss << "0";
+			if (i <= range_start && i >= range_end) s.append("1");
+			else s.append("0");
 		}
-		ss << ")";
+		s.append(")");
 		range_start -= (r.msb - r.lsb) + 1;
 	}
 
 	if (comment) {
-		ss << " /* " << var << "[";
+		s.append(" /* ");
+		s.append(var);
+		s.append("[");
 		for (auto ri = v.begin(); ri != v.end(); ri++) {
 			rv_bitrange r = *ri;
-			if (ri != v.begin()) ss << "|";
-			if (r.msb == r.lsb) ss << r.msb;
-			else ss << r.msb << ":" << r.lsb;
+			if (ri != v.begin()) s.append("|");
+			if (r.msb == r.lsb) s.append(std::to_string(r.msb));
+			else {
+				s.append(std::to_string(r.msb));
+				s.append(":");
+				s.append(std::to_string(r.lsb));
+			}
 		}
-		ss << "] */";
+		s.append("] */");
 	}
 
-	return ss.str();
-}
-
-std::string rv_meta_model::opcode_mask(rv_opcode_ptr opcode)
-{
-	std::stringstream ss;
-	ss << std::left << std::setw(20) << "";
-	for (auto &mask : opcode->masks) {
-		ss << " " << mask.first.msb << ".." << mask.first.lsb << "=" << mask.second;
-	}
-	return ss.str();
+	return s;
 }
 
 std::string rv_meta_model::format_type(rv_operand_ptr operand)
@@ -500,15 +540,15 @@ std::vector<std::string> rv_meta_model::parse_line(std::string line)
 
 std::vector<std::vector<std::string>> rv_meta_model::read_file(std::string filename)
 {
+	char buf[256], *s;
 	std::vector<std::vector<std::string>> data;
-	std::ifstream in(filename.c_str());
-	std::string line;
-	if (!in.is_open()) {
+	FILE *file = fopen(filename.c_str(), "r");
+	if (!file) {
 		panic("error opening %s\n", filename.c_str());
 	}
-	while (in.good())
+	while ((s = fgets(buf, sizeof(buf), file)))
 	{
-		std::getline(in, line);
+		std::string line = s;
 		size_t hoffset = line.find("#");
 		if (hoffset != std::string::npos) {
 			line = ltrim(rtrim(line.substr(0, hoffset)));
@@ -517,7 +557,7 @@ std::vector<std::vector<std::string>> rv_meta_model::read_file(std::string filen
 		if (part.size() == 0) continue;
 		data.push_back(part);
 	}
-	in.close();
+	fclose(file);
 	return data;
 }
 
@@ -592,6 +632,7 @@ rv_extension_list rv_meta_model::decode_isa_extensions(std::string isa_spec)
 			ext_isa_width_str = std::to_string(ext->isa_width);
 			if (isa_spec.find(ext_isa_width_str) == ext_prefix.size()) {
 				ext_isa_width = ext->isa_width;
+				break;
 			}
 		}
 	}
@@ -708,22 +749,22 @@ bool rv_meta_model::is_extension(std::string mnem)
 
 void rv_meta_model::parse_operand(std::vector<std::string> &part)
 {
-	if (part.size() < 6) {
-		panic("operands requires 6 parameters: %s", join(part, " ").c_str());
+	if (part.size() < 4) {
+		panic("operands requires 4 parameters: %s", join(part, " ").c_str());
 	}
 	auto operand = operands_by_name[part[0]] = std::make_shared<rv_operand>(
-		part[0], part[1], part[2], part[3], part[4], part[5]
+		part[0], part[1], part[2], part[3]
 	);
 	operands.push_back(operand);
 }
 
 void rv_meta_model::parse_enum(std::vector<std::string> &part)
 {
-	if (part.size() < 4) {
-		panic("operands requires 4 parameters: %s", join(part, " ").c_str());
+	if (part.size() < 5) {
+		panic("enums requires 5 parameters: %s", join(part, " ").c_str());
 	}
 	auto enumv = enums_by_name[part[0]] = std::make_shared<rv_enum>(
-		part[0], part[1], part[2], part[3]
+		part[0], part[1], part[2], part[3], decode_version_spec(part[4])
 	);
 	enums.push_back(enumv);
 }
@@ -806,13 +847,42 @@ void rv_meta_model::parse_register(std::vector<std::string> &part)
 
 void rv_meta_model::parse_csr(std::vector<std::string> &part)
 {
-	if (part.size() < 4) {
-		panic("csrs requires 4 parameters: %s", join(part, " ").c_str());
+	if (part.size() < 5) {
+		panic("csrs requires 5 parameters: %s", join(part, " ").c_str());
 	}
 	auto csr = csrs_by_name[part[2]] = std::make_shared<rv_csr>(
-		part[0], part[1], part[2], part[3]
+		part[0], part[1], part[2], part[3], decode_version_spec(part[4])
 	);
 	csrs.push_back(csr);
+}
+
+void rv_meta_model::parse_csr_field(std::vector<std::string> &part)
+{
+	if (part.size() < 6) {
+		panic("csr-fields requires 6 parameters: %s", join(part, " ").c_str());
+	}
+	auto csr_field = std::make_shared<rv_csr_field>(
+		part[0], part[1], part[2], part[3], part[4], decode_version_spec(part[5])
+	);
+	csr_fields.push_back(csr_field);
+}
+
+void rv_meta_model::parse_opcode_major(std::vector<std::string> &part)
+{
+	if (part.size() < 2) {
+		panic("opcode-majors requires at least 2 parameters: %s", join(part, " ").c_str());
+	}
+	auto opcode_major = std::make_shared<rv_opcode_major>();
+	for (auto mnem : part) {
+		if (is_mask(mnem)) {
+			opcode_major->masks.push_back(decode_mask(mnem));
+		} else if (opcode_major->name.size() == 0) {
+			opcode_major->name = mnem;
+		} else {
+			panic("opcode-majors: unexpected token: %s", mnem.c_str());
+		}
+	}
+	opcode_majors.push_back(opcode_major);
 }
 
 void rv_meta_model::parse_opcode(std::vector<std::string> &part)
@@ -1020,6 +1090,37 @@ void rv_meta_model::parse_pseudo(std::vector<std::string> &part)
 	pseudo_opcode->codec = real_opcode->codec;
 }
 
+void rv_meta_model::parse_opcode_classes(std::vector<std::string> &part)
+{
+	if (part.size() < 2) return;
+	std::string opcode_name = part[0];
+	std::vector<std::string> op_class_names = split(part[1], ",");
+	rv_opcode_class_list op_classes;
+
+	for (auto op_class_name : op_class_names) {
+		rv_opcode_class_ptr opcode_class;
+		auto ci = opcode_classes_byname.find(op_class_name);
+		if (ci != opcode_classes_byname.end()) {
+			opcode_class = ci->second;
+		} else {
+			opcode_class = std::make_shared<rv_opcode_class>(op_class_name);
+			opcode_classes.push_back(opcode_class);
+			opcode_classes_byname[op_class_name] = opcode_class;
+		}
+		op_classes.push_back(opcode_class);
+	}
+
+	for (auto opcode : lookup_opcode_by_name(opcode_name)) {
+		for (auto opcode_class : op_classes) {
+			opcode->classes.push_back(opcode_class);
+			if (std::find(opcode_class->opcodes.begin(), opcode_class->opcodes.end(),
+					opcode) == opcode_class->opcodes.end()) {
+				opcode_class->opcodes.push_back(opcode);
+			}
+		}
+	}
+}
+
 void rv_meta_model::parse_opcode_fullname(std::vector<std::string> &part)
 {
 	if (part.size() < 1) return;
@@ -1082,10 +1183,13 @@ bool rv_meta_model::read_metadata(std::string dirname)
 	for (auto part : read_file(dirname + std::string("/") + EXTENSIONS_FILE)) parse_extension(part);
 	for (auto part : read_file(dirname + std::string("/") + REGISTERS_FILE)) parse_register(part);
 	for (auto part : read_file(dirname + std::string("/") + CSRS_FILE)) parse_csr(part);
+	for (auto part : read_file(dirname + std::string("/") + CSR_FIELDS_FILE)) parse_csr_field(part);
+	for (auto part : read_file(dirname + std::string("/") + OPCODE_MAJORS_FILE)) parse_opcode_major(part);
 	for (auto part : read_file(dirname + std::string("/") + OPCODES_FILE)) parse_opcode(part);
 	for (auto part : read_file(dirname + std::string("/") + CONSTRAINTS_FILE)) parse_constraint(part);
 	for (auto part : read_file(dirname + std::string("/") + COMPRESSION_FILE)) parse_compression(part);
 	for (auto part : read_file(dirname + std::string("/") + PSEUDO_FILE)) parse_pseudo(part);
+	for (auto part : read_file(dirname + std::string("/") + OPCODE_CLASSES_FILE)) parse_opcode_classes(part);
 	for (auto part : read_file(dirname + std::string("/") + OPCODE_FULLNAMES_FILE)) parse_opcode_fullname(part);
 	for (auto part : read_file(dirname + std::string("/") + OPCODE_DESCRIPTIONS_FILE)) parse_opcode_description(part);
 	for (auto part : read_file(dirname + std::string("/") + OPCODE_PSEUDOCODE_C_FILE)) parse_opcode_pseudocode_c(part);

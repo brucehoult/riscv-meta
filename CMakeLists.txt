@@ -1,66 +1,28 @@
-project(riscv-meta)
-cmake_minimum_required(VERSION 3.1.0)
+project(rv8)
+cmake_minimum_required(VERSION 3.2.0)
+
+set (CMAKE_CXX_STANDARD 14)
+
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+set(CMAKE_CXX_FLAGS "-Wall")
+set(CMAKE_CXX_FLAGS_DEBUG "-g")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
 set(ASMJIT_STATIC true)
-add_subdirectory(asmjit)
+add_subdirectory(third_party/asmjit)
 
-set(
-	libedit_SOURCES
-	src/edit/chared.c
-	src/edit/common.c
-	src/edit/el.c
-	src/edit/eln.c
-	src/edit/emacs.c
-	src/edit/filecomplete.c
-	src/edit/hist.c
-	src/edit/history.c
-	src/edit/historyn.c
-	src/edit/keymacro.c
-	src/edit/map.c
-	src/edit/chartype.c
-	src/edit/parse.c
-	src/edit/prompt.c
-	src/edit/read.c
-	src/edit/readline.c
-	src/edit/refresh.c
-	src/edit/search.c
-	src/edit/sig.c
-	src/edit/terminal.c
-	src/edit/tokenizer.c
-	src/edit/tokenizern.c
-	src/edit/tty.c
-	src/edit/unvis.c
-	src/edit/vis.c
-	src/edit/vi.c
-)
-
-set(
-	libexpr_SOURCES
-	src/expr/builtin-features.cc
-	src/expr/catch.cc
-	src/expr/functions.cc
-	src/expr/objects.cc
-	src/expr/packToken.cc
-	src/expr/shunting-yard.cc
-)
-
-set(
-	libriscv_asm_SOURCES
+set(libriscv_asm_SOURCES
 	src/asm/assembler.cc
 	src/asm/disasm.cc
 	src/asm/format.cc
 	src/asm/jit.cc
 	src/asm/meta.cc
-	src/asm/strings.cc
-)
+	src/asm/strings.cc)
 
-set(
-	libriscv_crypto_SOURCES
-	src/crypto/sha512.cc
-)
-
-set(
-	libriscv_gen_SOURCES
+set(libriscv_gen_SOURCES
 	src/gen/gen-cc.cc
 	src/gen/gen-constraints.cc
 	src/gen/gen-fpu-test.cc
@@ -70,139 +32,88 @@ set(
 	src/gen/gen-latex-alt.cc
 	src/gen/gen-map.cc
 	src/gen/gen-meta.cc
+	src/gen/gen-markdown.cc
 	src/gen/gen-operands.cc
 	src/gen/gen-strings.cc
 	src/gen/gen-switch.cc
-	src/gen/gen-tablegen.cc
-)
+	src/gen/gen-tablegen.cc)
 
-set(
-	libriscv_elf_SOURCES
+set(libriscv_elf_SOURCES
 	src/elf/elf.cc
 	src/elf/elf-file.cc
-	src/elf/elf-format.cc
-)
+	src/elf/elf-format.cc)
 
-set(
-	libriscv_fmt_SOURCES
-	src/fmt/bigint.cc
-	src/fmt/dtoa.cc
-	src/fmt/hdtoa.cc
-	src/fmt/itoa.cc
-	src/fmt/fmt.cc
-)
+set(libriscv_model_SOURCES
+	src/model/model.cc)
 
-set(
-	libriscv_model_SOURCES
-	src/model/model.cc
-)
-
-set(
-	libriscv_util_SOURCES
+set(libriscv_util_SOURCES
 	src/util/base64.cc
+	src/util/bigint.cc
 	src/util/cmdline.cc
 	src/util/color.cc
-	src/util/config-string.cc
-	src/util/config-parser.cc
+	src/util/dtoa.cc
+	src/util/fmt.cc
+	src/util/hdtoa.cc
 	src/util/host.cc
+	src/util/itoa.cc
 	src/util/util.cc
-)
+	src/util/sha512.cc)
 
-set(
-	rv_asm_SOURCES
-	src/app/rv-asm.cc
-)
-
-set(
-	rv_bin_SOURCES
-	src/app/rv-compress.cc
+set(rv_bin_SOURCES
 	src/app/rv-dump.cc
 	src/app/rv-histogram.cc
 	src/app/rv-pte.cc
-	src/app/rv-bin.cc
-)
-
-set(
-	rv_jit_SOURCES
-	src/app/rv-jit.cc
-)
-
-set(
-	rv_meta_SOURCES
-	src/app/rv-meta.cc
-)
-
-set(
-	rv_sim_SOURCES
-	src/app/rv-sim.cc
-)
-
-set(
-	rv_sys_SOURCES
-	src/app/rv-sys.cc
-)
+	src/app/rv-bin.cc)
 
 include_directories(
 	src/asm
 	src/abi
-	src/crypto
-	src/edit
 	src/elf
 	src/emu
-	src/expr
-	src/fmt
 	src/gen
+	src/hash
+	src/jit
+	src/mem
 	src/model
 	src/rom
 	src/util
-	asmjit/src/asmjit
-)
+	third_party/asmjit/src/asmjit)
 
-add_library(edit ${libedit_SOURCES})
+if("${CMAKE_SYSTEM_NAME}" MATCHES "Linux")
+	set(mmap_SOURCES
+		src/mem/mmap-core.c
+		src/mem/mmap-linux.c)
+	add_library(mmap-linux SHARED ${mmap_SOURCES})
+	set(MMAP_LIBS mmap-linux ${CMAKE_DL_LIBS})
+	link_libraries("-lrt -lpthread -pie -Wl,-Ttext-segment=0x7ffe00000000")
+endif()
 
-add_library(expr ${libexpr_SOURCES})
-target_compile_features(expr PRIVATE cxx_generic_lambdas)
+if(APPLE)
+	set(mmap_SOURCES
+		src/mem/mmap-core.c
+		src/mem/mmap-macos.c)
+	add_library(mmap-macos SHARED ${mmap_SOURCES})
+	set(MMAP_LIBS mmap-macos ${CMAKE_DL_LIBS})
+	link_libraries("-lpthread -Wl,-pagezero_size,0x1000 -Wl,-no_pie -image_base 0x7ffe00000000")
+endif()
 
 add_library(riscv_asm ${libriscv_asm_SOURCES})
-target_compile_features(riscv_asm PRIVATE cxx_generic_lambdas)
-
-add_library(riscv_crypto ${libriscv_crypto_SOURCES})
-
 add_library(riscv_gen ${libriscv_gen_SOURCES})
-target_compile_features(riscv_gen PRIVATE cxx_generic_lambdas)
-
 add_library(riscv_elf ${libriscv_elf_SOURCES})
-target_compile_features(riscv_elf PRIVATE cxx_generic_lambdas)
-
-add_library(riscv_fmt ${libriscv_fmt_SOURCES})
-target_compile_features(riscv_fmt PRIVATE cxx_generic_lambdas)
-
 add_library(riscv_model ${libriscv_model_SOURCES})
-target_compile_features(riscv_model PRIVATE cxx_generic_lambdas)
-
 add_library(riscv_util ${libriscv_util_SOURCES})
-target_compile_features(riscv_util PRIVATE cxx_generic_lambdas)
-
-add_executable(rv-asm ${rv_asm_SOURCES})
-target_compile_features(rv-asm PRIVATE cxx_generic_lambdas)
-target_link_libraries(rv-asm expr riscv_asm riscv_elf riscv_fmt riscv_util)
 
 add_executable(rv-bin ${rv_bin_SOURCES})
-target_compile_features(rv-bin PRIVATE cxx_generic_lambdas)
-target_link_libraries(rv-bin riscv_asm riscv_elf riscv_fmt riscv_util)
+target_link_libraries(rv-bin riscv_asm riscv_elf riscv_util)
 
-add_executable(rv-jit ${rv_jit_SOURCES})
-target_compile_features(rv-jit PRIVATE cxx_generic_lambdas)
-target_link_libraries(rv-jit riscv_asm riscv_elf riscv_fmt riscv_util asmjit edit ncurses)
+add_executable(rv-meta src/app/rv-meta.cc)
+target_link_libraries(rv-meta riscv_model riscv_gen riscv_util)
 
-add_executable(rv-meta ${rv_meta_SOURCES})
-target_compile_features(rv-meta PRIVATE cxx_generic_lambdas)
-target_link_libraries(rv-meta riscv_model riscv_gen riscv_fmt riscv_util)
+add_executable(rv-sys src/app/rv-sys.cc)
+target_link_libraries(rv-sys ncurses riscv_asm riscv_elf riscv_util)
 
-add_executable(rv-sim ${rv_sim_SOURCES})
-target_compile_features(rv-sim PRIVATE cxx_generic_lambdas)
-target_link_libraries(rv-sim ncurses edit riscv_asm riscv_crypto riscv_elf riscv_fmt riscv_util)
+add_executable(rv-sim src/app/rv-sim.cc)
+target_link_libraries(rv-sim ncurses riscv_asm riscv_elf riscv_util ${MMAP_LIBS})
 
-add_executable(rv-sys ${rv_sys_SOURCES})
-target_compile_features(rv-sys PRIVATE cxx_generic_lambdas)
-target_link_libraries(rv-sys ncurses edit riscv_asm riscv_crypto riscv_elf riscv_fmt riscv_util)
+add_executable(rv-jit src/app/rv-jit.cc)
+target_link_libraries(rv-jit riscv_asm riscv_elf riscv_util asmjit ${MMAP_LIBS})

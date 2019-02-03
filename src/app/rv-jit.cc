@@ -30,22 +30,22 @@
 #include <atomic>
 #include <type_traits>
 
-#if defined(__APPLE__)
-#include "libc_override_osx.h"
-#endif
-
-#include <sparsehash/dense_hash_map>
+#include "dense_hash_map"
 
 #include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <libgen.h>
 #include <termios.h>
+#include <sys/uio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/time.h>
+#include <sys/times.h>
+#include <sys/ioctl.h>
 #include <sys/utsname.h>
-
-#include "histedit.h"
+#include <sys/resource.h>
 
 #include "host-endian.h"
 #include "types.h"
@@ -57,6 +57,7 @@
 #include "util.h"
 #include "host.h"
 #include "cmdline.h"
+#include "color.h"
 #include "codec.h"
 #include "elf.h"
 #include "elf-file.h"
@@ -73,7 +74,9 @@
 #include "interp.h"
 #include "processor-model.h"
 #include "mmu-proxy.h"
+#include "mmap-core.h"
 #include "unknown-abi.h"
+#include "processor-histogram.h"
 #include "processor-proxy.h"
 #include "debug-cli.h"
 
@@ -83,21 +86,37 @@
 #include "jit-emitter-rv32.h"
 #include "jit-emitter-rv64.h"
 #include "jit-fusion.h"
+#include "jit-tracer.h"
+#include "jit-regalloc.h"
 #include "jit-runloop.h"
 
 using namespace riscv;
 
+/* Parameterized ABI proxy JIT processor models */
+
 using proxy_model_rv32imafdc = processor_rv32imafdc_model<
 	jit_decode, processor_rv32imafd, mmu_proxy_rv32>;
-using proxy_jit_rv32imafdc = jit_runloop<
-	processor_proxy<proxy_model_rv32imafdc>,
-	jit_fusion<jit_emitter_rv32<proxy_model_rv32imafdc>>>;
-
 using proxy_model_rv64imafdc = processor_rv64imafdc_model<
 	jit_decode, processor_rv64imafd, mmu_proxy_rv64>;
+
+using proxy_jit_rv32imafdc_fusion = jit_runloop<
+	processor_proxy<proxy_model_rv32imafdc>,
+	jit_fusion<jit_tracer<proxy_model_rv32imafdc,jit_isa_rv32>>,
+	jit_emitter_rv32<proxy_model_rv32imafdc>>;
+using proxy_jit_rv64imafdc_fusion = jit_runloop<
+	processor_proxy<proxy_model_rv64imafdc>,
+	jit_fusion<jit_tracer<proxy_model_rv64imafdc,jit_isa_rv64>>,
+	jit_emitter_rv64<proxy_model_rv64imafdc>>;
+
+using proxy_jit_rv32imafdc = jit_runloop<
+	processor_proxy<proxy_model_rv32imafdc>,
+	jit_tracer<proxy_model_rv32imafdc,jit_isa_rv32>,
+	jit_emitter_rv32<proxy_model_rv32imafdc>>;
 using proxy_jit_rv64imafdc = jit_runloop<
 	processor_proxy<proxy_model_rv64imafdc>,
-	jit_fusion<jit_emitter_rv64<proxy_model_rv64imafdc>>>;
+	jit_tracer<proxy_model_rv64imafdc,jit_isa_rv64>,
+	jit_emitter_rv64<proxy_model_rv64imafdc>>;
+
 
 /* environment variables */
 
@@ -116,8 +135,21 @@ static bool allow_env_var(const char *var)
 	return false;
 }
 
-struct rv_jit
+/* RISC-V User Mode Emulator and Binary Translator */
+
+struct rv_jit_emulator
 {
+	/*
+		ABI/AEE RISC-V user mode interpreter and binary translator.
+		Code is interpreted and profiled for hot paths which are translated
+		to native x86-64 machine code and executed from a trace cache.
+
+		A subset of linux syscalls are proxied to the host operating system
+
+		(ABI) application binary interface
+		(AEE) application execution environment
+	*/
+
 	enum jit_mode {
 		jit_mode_none,
 		jit_mode_trace,
@@ -125,160 +157,23 @@ struct rv_jit
 	};
 
 	jit_mode mode = jit_mode_trace;
-	elf_file elf;
 	host_cpu &cpu;
 	int proc_logs = 0;
 	int trace_iters = 100;
 	int trace_length = 0;
+	bool disable_fusion = false;
+	bool memory_registers = false;
+	bool update_instret = false;
 	bool help_or_error = false;
+	bool symbolicate = false;
+	uint64_t initial_seed = 0;
 	std::string elf_filename;
+	std::string stats_dirname;
 
 	std::vector<std::string> host_cmdline;
 	std::vector<std::string> host_env;
 
-	rv_jit() : cpu(host_cpu::get_instance()) {}
-
-	static const int elf_p_flags_mmap(int v)
-	{
-		int prot = 0;
-		if (v & PF_X) prot |= PROT_EXEC;
-		if (v & PF_W) prot |= PROT_WRITE;
-		if (v & PF_R) prot |= PROT_READ;
-		return prot;
-	}
-
-	/* Map a single stack segment into user address space */
-	template <typename P>
-	void map_proxy_stack(P &proc, addr_t stack_top, size_t stack_size)
-	{
-		void *addr = mmap((void*)(stack_top - stack_size), stack_size,
-			PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-		if (addr == MAP_FAILED) {
-			panic("map_proxy_stack: error: mmap: %s", strerror(errno));
-		}
-
-		/* keep track of the mapped segment and set the stack_top */
-		proc.mmu.mem->segments.push_back(std::pair<void*,size_t>((void*)(stack_top - stack_size), stack_size));
-		*(u64*)(stack_top - sizeof(u64)) = 0xfeedcafebabef00dULL;
-		proc.ireg[rv_ireg_sp] = stack_top - sizeof(u64);
-
-		/* log stack creation */
-		if (proc.log & proc_log_memory) {
-			debug("mmap-sp  :%016" PRIxPTR "-%016" PRIxPTR " +R+W",
-				(stack_top - stack_size), stack_top);
-		}
-	}
-
-	template <typename P>
-	void copy_to_proxy_stack(P &proc, addr_t stack_top, size_t stack_size, void *data, size_t len)
-	{
-		proc.ireg[rv_ireg_sp] = proc.ireg[rv_ireg_sp] - len;
-		if (size_t(stack_top - proc.ireg[rv_ireg_sp]) > stack_size) {
-			panic("copy_to_proxy_stack: overflow: %d > %d",
-				stack_top - proc.ireg[rv_ireg_sp], stack_size);
-		}
-		memcpy((void*)(uintptr_t)proc.ireg[rv_ireg_sp].r.xu.val, data, len);
-	}
-
-	template <typename P>
-	void setup_proxy_stack(P &proc, addr_t stack_top, size_t stack_size)
-	{
-		/* set up auxiliary vector, environment and command line at top of stack */
-
-		/*
-			STACK TOP
-			env data
-			arg data
-			padding, align 16
-			auxv table, AT_NULL terminated
-			envp array, null terminated
-			argv pointer array, null terminated
-			argc <- stack pointer
-
-			enum {
-				AT_NULL = 0,         * end of auxiliary vector *
-				AT_BASE = 7,         * pointer to image base *
-			};
-
-			typedef struct {
-				Elf32_Word a_type;
-				Elf32_Word a_val;
-			} Elf32_auxv;
-
-			typedef struct {
-				Elf64_Word a_type;
-				Elf64_Word a_val;
-			} Elf64_auxv;
-		*/
-
-
-		/* add environment data to stack */
-		std::vector<typename P::ux> env_data;
-		for (auto &env : host_env) {
-			copy_to_proxy_stack(proc, stack_top, stack_size, (void*)env.c_str(), env.size() + 1);
-			env_data.push_back(typename P::ux(proc.ireg[rv_ireg_sp].r.xu.val));
-		}
-		env_data.push_back(0);
-
-		/* add command line data to stack */
-		std::vector<typename P::ux> arg_data;
-		for (auto &arg : host_cmdline) {
-			copy_to_proxy_stack(proc, stack_top, stack_size, (void*)arg.c_str(), arg.size() + 1);
-			arg_data.push_back(typename P::ux(proc.ireg[rv_ireg_sp].r.xu.val));
-		}
-		arg_data.push_back(0);
-
-		/* align stack to 16 bytes */
-		proc.ireg[rv_ireg_sp] = proc.ireg[rv_ireg_sp] & ~15;
-
-		/* TODO - Add auxiliary vector to stack */
-
-		/* add environment array to stack */
-		copy_to_proxy_stack(proc, stack_top, stack_size, (void*)env_data.data(),
-			env_data.size() * sizeof(typename P::ux));
-
-		/* add command line array to stack */
-		copy_to_proxy_stack(proc, stack_top, stack_size, (void*)arg_data.data(),
-			arg_data.size() * sizeof(typename P::ux));
-
-		/* add argc, argv, envp to stack */
-		typename P::ux argc = host_cmdline.size();
-		copy_to_proxy_stack(proc, stack_top, stack_size, (void*)&argc, sizeof(argc));
-	}
-
-	/* Map ELF load segments into proxy MMU address space */
-	template <typename P>
-	void map_load_segment_user(P &proc, const char* filename, Elf64_Phdr &phdr)
-	{
-		int fd = open(filename, O_RDONLY);
-		if (fd < 0) {
-			panic("map_executable: error: open: %s: %s", filename, strerror(errno));
-		}
-		addr_t map_delta = phdr.p_offset & (page_size-1);
-		addr_t map_offset = phdr.p_offset - map_delta;
-		addr_t map_vaddr = phdr.p_vaddr - map_delta;
-		addr_t map_len = round_up(phdr.p_memsz + map_delta, page_size);
-		void *addr = mmap((void*)map_vaddr, map_len,
-			elf_p_flags_mmap(phdr.p_flags), MAP_FIXED | MAP_PRIVATE, fd, map_offset);
-		close(fd);
-		if (addr == MAP_FAILED) {
-			panic("map_executable: error: mmap: %s: %s", filename, strerror(errno));
-		}
-
-		/* log elf load segment virtual address range */
-		if (proc.log & proc_log_memory) {
-			debug("mmap-elf :%016" PRIxPTR "-%016" PRIxPTR " %s offset=%" PRIxPTR,
-				addr_t(map_vaddr), addr_t(map_vaddr + map_len),
-				elf_p_flags_name(phdr.p_flags).c_str(), addr_t(map_offset));
-		}
-
-		/* add the mmap to the emulator proxy_mmu */
-		proc.mmu.mem->segments.push_back(std::pair<void*,size_t>((void*)phdr.p_vaddr, phdr.p_memsz));
-		addr_t seg_end = addr_t(map_vaddr + map_len);
-		if (proc.mmu.mem->heap_begin < seg_end) {
-			proc.mmu.mem->brk = proc.mmu.mem->heap_begin = proc.mmu.mem->heap_end = seg_end;
-		}
-	}
+	rv_jit_emulator() : cpu(host_cpu::get_instance()) {}
 
 	void parse_commandline(int argc, const char* argv[], const char* envp[])
 	{
@@ -290,27 +185,54 @@ struct rv_jit
 			{ "-o", "--log-operands", cmdline_arg_type_none,
 				"Log Instructions and Operands",
 				[&](std::string s) { return (proc_logs |= (proc_log_inst | proc_log_trap | proc_log_operands)); } },
+			{ "-S", "--symbolicate", cmdline_arg_type_none,
+				"Symbolicate addresses in instruction log",
+				[&](std::string s) { return (symbolicate = true); } },
 			{ "-m", "--log-memory-map", cmdline_arg_type_none,
 				"Log Memory Map Information",
 				[&](std::string s) { return (proc_logs |= proc_log_memory); } },
+			{ "-c", "--log-syscalls", cmdline_arg_type_none,
+				"Log System Calls",
+				[&](std::string s) { return (proc_logs |= proc_log_syscall); } },
 			{ "-r", "--log-registers", cmdline_arg_type_none,
 				"Log Registers (defaults to integer registers)",
 				[&](std::string s) { return (proc_logs |= proc_log_int_reg); } },
 			{ "-T", "--log-jit-trace", cmdline_arg_type_none,
 				"Log JIT trace",
 				[&](std::string s) { return (proc_logs |= proc_log_jit_trace); } },
-			{ "-H", "--register-usage-histogram", cmdline_arg_type_none,
-				"Record register usage",
-				[&](std::string s) { return (proc_logs |= proc_log_hist_reg); } },
+			{ "-T", "--log-jit-regalloc", cmdline_arg_type_none,
+				"Log JIT register allocation",
+				[&](std::string s) { return (proc_logs |= proc_log_jit_regalloc); } },
+			{ "-E", "--log-exit-stats", cmdline_arg_type_none,
+				"Log Registers and Statistics at Exit",
+				[&](std::string s) { return (proc_logs |= proc_log_exit_log_stats); } },
+			{ "-D", "--save-exit-stats", cmdline_arg_type_string,
+				"Save Registers and Statistics at Exit",
+				[&](std::string s) { stats_dirname = s; return (proc_logs |= proc_log_exit_save_stats); } },
 			{ "-P", "--pc-usage-histogram", cmdline_arg_type_none,
 				"Record program counter usage",
 				[&](std::string s) { return (proc_logs |= proc_log_hist_pc); } },
+			{ "-R", "--register-usage-histogram", cmdline_arg_type_none,
+				"Record register usage",
+				[&](std::string s) { return (proc_logs |= proc_log_hist_reg); } },
+			{ "-I", "--instruction-usage-histogram", cmdline_arg_type_none,
+				"Record instruction usage",
+				[&](std::string s) { return (proc_logs |= proc_log_hist_inst); } },
 			{ "-d", "--debug", cmdline_arg_type_none,
 				"Start up in debugger CLI",
 				[&](std::string s) { return (proc_logs |= proc_log_ebreak_cli); } },
 			{ "-x", "--no-pseudo", cmdline_arg_type_none,
 				"Disable Pseudoinstruction decoding",
 				[&](std::string s) { return (proc_logs |= proc_log_no_pseudo); } },
+			{ "-N", "--no-fusion", cmdline_arg_type_none,
+				"Disable JIT macro-op fusion",
+				[&](std::string s) { return (disable_fusion = true); } },
+			{ "-M", "--memory-mapped-registers", cmdline_arg_type_none,
+				"Disable JIT host register mapping",
+				[&](std::string s) { return (memory_registers = true); } },
+			{ "-i", "--update-instret", cmdline_arg_type_none,
+				"Update instret in JIT code",
+				[&](std::string s) { return (update_instret = true); } },
 			{ "-t", "--no-trace", cmdline_arg_type_none,
 				"Disable JIT tracer",
 				[&](std::string s) { mode = jit_mode_none; return true; } },
@@ -320,9 +242,9 @@ struct rv_jit
 			{ "-I", "--trace-iters", cmdline_arg_type_string,
 				"Trace iterations",
 				[&](std::string s) { trace_iters = strtoull(s.c_str(), nullptr, 10); return true; } },
-			{ "-L", "--trace-length", cmdline_arg_type_string,
-				"Trace length",
-				[&](std::string s) { trace_length = strtoull(s.c_str(), nullptr, 10); return true; } },
+			{ "-s", "--seed", cmdline_arg_type_string,
+				"Random seed",
+				[&](std::string s) { initial_seed = strtoull(s.c_str(), nullptr, 10); return true; } },
 			{ "-h", "--help", cmdline_arg_type_none,
 				"Show help",
 				[&](std::string s) { return (help_or_error = true); } },
@@ -337,9 +259,8 @@ struct rv_jit
 			help_or_error = true;
 		}
 
-		if (help_or_error)
-		{
-			printf("usage: %s [<options>] <asm_file>\n", argv[0]);
+		if (help_or_error) {
+			printf("usage: %s [<emulator_options>] [--] <elf_file> [<options>]\n", argv[0]);
 			cmdline_option::print_options(options);
 			exit(9);
 		}
@@ -356,9 +277,6 @@ struct rv_jit
 				host_env.push_back(*env);
 			}
 		}
-
-		/* load ELF (headers only) */
-		elf.load(elf_filename, true);
 	}
 
 	/* Start the execuatable with the given proxy processor template */
@@ -380,61 +298,77 @@ struct rv_jit
 				break;
 		}
 
-		/* instantiate processor, set log options and program counter to entry address */
+		/* instantiate processor and set log options */
 		P proc;
 		proc.log = proc_logs;
-		proc.pc = elf.ehdr.e_entry;
 		proc.mmu.mem->log = (proc.log & proc_log_memory);
+		proc.stats_dirname = stats_dirname;
+		if (symbolicate) proc.symlookup = [&](addr_t va) { return proc.symlookup_elf(va); };
+
+		/* set JIT options */
 		proc.trace_iters = trace_iters;
-		proc.trace_length = trace_length;
+		proc.update_instret = update_instret;
+		proc.memory_registers = memory_registers;
 
-		/* Find the ELF executable PT_LOAD segments and mmap them into user memory */
-		for (size_t i = 0; i < elf.phdrs.size(); i++) {
-			Elf64_Phdr &phdr = elf.phdrs[i];
-			if (phdr.p_flags & (PT_LOAD | PT_DYNAMIC)) {
-				map_load_segment_user(proc, elf_filename.c_str(), phdr);
-			}
-		}
+		/* randomise integer register state with 512 bits of entropy */
+		proc.seed_registers(cpu, initial_seed, 512);
 
-		/* Map a stack and set the stack pointer */
-		static const size_t stack_size = 0x00100000; // 1 MiB
-		map_proxy_stack(proc, P::mmu_type::memory_top, stack_size);
-		setup_proxy_stack(proc, P::mmu_type::memory_top, stack_size);
+		/* Map ELF executable and setup the stack */
+		proc.map_executable(elf_filename, host_cmdline, symbolicate);
+		proc.map_proxy_stack(P::mmu_type::memory_top, P::mmu_type::stack_size);
+		proc.setup_proxy_stack(cpu, host_cmdline, host_env,
+			P::mmu_type::memory_top, P::mmu_type::stack_size);
 
-		/* Initialize interpreter */
+		/* Initialize and run the processor */
 		proc.init();
-
-		/* Run the CPU until it halts */
-		proc.run(proc.log & proc_log_ebreak_cli
-			? exit_cause_cli : exit_cause_continue);
-
-		/* Unmap memory segments */
-		for (auto &seg: proc.mmu.mem->segments) {
-			munmap(seg.first, seg.second);
-		}
+		proc.run(proc.log & proc_log_ebreak_cli ? exit_cause_cli : exit_cause_continue);
+		proc.destroy();
 	}
 
+	/* Start a specific processor implementation based on ELF type */
 	void exec()
 	{
+		elf_file elf;
+		elf.load(elf_filename, elf_load_exec);
+
+		/* check for RDTSCP on X86 */
+		#if X86_USE_RDTSCP
+		if (cpu.caps.size() > 0 && cpu.caps.find("RDTSCP") == cpu.caps.end()) {
+			panic("error: x86 host without RDTSCP. Recompile with -DX86_NO_RDTSCP");
+		}
+		#endif
+
 		/* execute */
-		switch (elf.ei_class) {
-			case ELFCLASS32:
-				start_jit<proxy_jit_rv32imafdc>(); break;
-				break;
-			case ELFCLASS64:
-				start_jit<proxy_jit_rv64imafdc>(); break;
-				break;
-			default: panic("illegal elf class");
+		if (disable_fusion) {
+			switch (elf.ei_class) {
+				case ELFCLASS32:
+					start_jit<proxy_jit_rv32imafdc>(); break;
+					break;
+				case ELFCLASS64:
+					start_jit<proxy_jit_rv64imafdc>(); break;
+					break;
+				default: panic("illegal elf class");
+			}
+		} else {
+			switch (elf.ei_class) {
+				case ELFCLASS32:
+					start_jit<proxy_jit_rv32imafdc_fusion>(); break;
+					break;
+				case ELFCLASS64:
+					start_jit<proxy_jit_rv64imafdc_fusion>(); break;
+					break;
+				default: panic("illegal elf class");
+			}
 		}
 	}
 };
 
+
+/* program main */
+
 int main(int argc, const char *argv[], const char* envp[])
 {
-#if defined(__APPLE__)
-	ReplaceSystemAlloc();
-#endif
-	rv_jit jit;
+	rv_jit_emulator jit;
 	jit.parse_commandline(argc, argv, envp);
 	jit.exec();
 	return 0;

@@ -32,20 +32,8 @@ namespace riscv {
 			debug_cli *cli;
 		};
 
-		EditLine *el;
-		History *hist;
-		Tokenizer *tok;
-		HistEvent ev;
 		cmd_map map;
-
-		static const char* prompt(EditLine *el)
-		{
-			static char prompt_buf[32] = {};
-			cmd_state *st;
-			el_get(el, EL_CLIENTDATA, &st);
-			snprintf(prompt_buf, sizeof(prompt_buf), "(%s) ", st->proc->name());
-			return prompt_buf;
-		}
+		char line_buf[256];
 
 		static size_t word_size_mnem(std::string ws)
 		{
@@ -62,20 +50,8 @@ namespace riscv {
 			}
 		}
 
-		debug_cli() :
-			el(nullptr),
-			hist(nullptr),
-			tok(nullptr)
+		debug_cli()
 		{
-			/* set up editline */
-			hist = history_init();
-			history(hist, &ev, H_SETSIZE, 100);
-			tok  = tok_init(NULL);
-			el = el_init("rv-cli", stdin, stdout, stderr);
-			el_set(el, EL_EDITOR, "emacs");
-			el_set(el, EL_PROMPT_ESC, prompt, '\1');
-			el_set(el, EL_HIST, history, hist);
-
 			/* add commands to map */
 			add_command(cmd_dev,    1, 1, "dev",    "",                 "Show Devices");
 			add_command(cmd_disasm, 2, 2, "disasm", "<addr>",           "Disassemble Memory");
@@ -88,13 +64,6 @@ namespace riscv {
 			add_command(cmd_quit,   1, 1, "quit",   "",                 "End Simulation");
 			add_command(cmd_reg,    1, 1, "reg",    "",                 "Show Registers");
 			add_command(cmd_run,    1, 2, "run",    "[count]",          "Step processor");
-		}
-
-		~debug_cli()
-		{
-			el_end(el);
-			tok_end(tok);
-			history_end(hist);
 		}
 
 		void add_command(cmd_fn fn, size_t min_args, size_t max_args,
@@ -151,7 +120,7 @@ namespace riscv {
 			}
 			size_t i = 0;
 			while (i++ < 20) {
-				typename P::ux pc_offset;
+				typename P::ux pc_offset = 0;
 				typename P::decode_type dec;
 				inst_t inst = st.proc->mmu.inst_fetch(*st.proc,
 					typename P::ux(addr), pc_offset);
@@ -304,110 +273,56 @@ namespace riscv {
 			return 0;
 		}
 
-		static std::string repeat_str(std::string str, size_t count)
-		{
-			std::string s;
-			for (size_t i = 0; i < count; i++) s += str;
-			return s;
-		}
-
 		static size_t cmd_hist(cmd_state &st, args_t &args)
 		{
-			size_t max_chars = 80;
-			bool hist_reg = (args[1] == "reg"), hist_pc = (args[1] == "pc");
+			bool hist_pc = (args[1] == "pc");
+			bool hist_reg = (args[1] == "reg");
+			bool hist_inst = (args[1] == "inst");
 			bool reverse_sort = (args.size() == 3 && args[2] == "rev");
 
-			if (!hist_reg && !hist_pc) {
-				printf("%s: histogram type must be 'reg' or 'pc'\n",
+			if (!(hist_reg || hist_pc || hist_inst)) {
+				printf("%s: histogram type must be 'reg', 'pc' or 'inst'\n",
 					args[0].c_str());
 			}
 
 			if (hist_pc) {
-
-				size_t addr_count = st.proc->hist_pc.size();
-				size_t addr_shift = 0;
-				while (addr_count > 64) {
-					addr_count >>= 1;
-					addr_shift++;
-				}
-
-				hist_pc_map_t hist_pc_reduce;
-				for (auto ent : st.proc->hist_pc) {
-					addr_t key = ent.first >> addr_shift;
-					auto hi = hist_pc_reduce.find(key);
-					if (hi == hist_pc_reduce.end()) hist_pc_reduce.insert(hist_pc_pair_t(key, ent.second));
-					else hi->second += ent.second;
-				}
-
-				size_t max = 0, total = 0;
-				std::vector<hist_pc_pair_t> hist_pc_s;
-				for (auto ent : hist_pc_reduce) {
-					if (ent.second > max) max = ent.second;
-					total += ent.second;
-					hist_pc_s.push_back(hist_pc_pair_t(ent.first << addr_shift, ent.second));
-				}
-
-				std::sort(hist_pc_s.begin(), hist_pc_s.end(), [&] (const hist_pc_pair_t &a, const hist_pc_pair_t &b) {
-					return reverse_sort ? a.second < b.second : a.second > b.second;
-				});
-
-				size_t i = 0;
-				for (auto ent : hist_pc_s) {
-					printf("%5lu. 0x%016llx %5.2f%% [%-9lu] %s\n",
-						++i,
-						ent.first,
-						(float)ent.second / (float)total * 100.0f,
-						ent.second,
-						repeat_str("#", ent.second * (max_chars - 1) / max).c_str());
-				}
+				histogram_pc_print(*st.proc, reverse_sort);
 			}
 
 			if (hist_reg) {
-
-				size_t max = 0, total = 0;
-				std::vector<hist_reg_pair_t> hist_reg_s;
-				for (auto ent : st.proc->hist_reg) {
-					if (ent.second > max) max = ent.second;
-					total += ent.second;
-					hist_reg_s.push_back(ent);
-				}
-
-				std::sort(hist_reg_s.begin(), hist_reg_s.end(), [&] (const hist_reg_pair_t &a, const hist_reg_pair_t &b) {
-					return reverse_sort ? a.second < b.second : a.second > b.second;
-				});
-
-				size_t i = 0;
-				for (auto ent : hist_reg_s) {
-					printf("%5lu. %-10s %5.2f%% [%-9lu] %s\n",
-						++i,
-						ent.first < 32 ?
-							rv_ireg_name_sym[ent.first] :
-							rv_freg_name_sym[ent.first - 32],
-						(float)ent.second / (float)total * 100.0f,
-						ent.second,
-						repeat_str("#", ent.second * (max_chars - 1) / max).c_str());
-				}
+				histogram_reg_print(*st.proc, reverse_sort);
 			}
+
+			if (hist_inst) {
+				histogram_inst_print(*st.proc, reverse_sort);
+			}
+
 			return 0;
 		}
 
-		[[noreturn]] static size_t cmd_quit(cmd_state&, args_t &)
+		[[noreturn]] static size_t cmd_quit(cmd_state &st, args_t &)
 		{
+			st.proc->exit(1);
 			exit(1);
 		}
 
 		/* CLI main loop */
 
+		char* getline(P *proc)
+		{
+			fprintf(stdout, "(%s) ", proc->name());
+			fflush(stdout);
+			return fgets(line_buf, sizeof(line_buf), stdin);
+		}
+
 		size_t run(P *proc)
 		{
 			cmd_state st{ proc, this };
-			const char *buf = nullptr;
-			int num;
 			size_t inst_step;
+			char *buf;
 
-			el_set(el, EL_CLIENTDATA, &st);
 			proc->debug_enter();
-			while ((buf = el_gets(el, &num)) != NULL && num != 0) {
+			while ((buf = getline(proc)) != NULL) {
 				auto line = ltrim(rtrim(buf));
 				auto args = split(line, " ", false, false);
 				if (args.size() == 0) continue;
@@ -429,7 +344,6 @@ namespace riscv {
 					}
 					continue;
 				}
-				history(hist, &ev, H_ENTER, line.c_str());
 				if ((inst_step = def.fn(st, args)) != 0) break;
 			}
 			proc->debug_leave();

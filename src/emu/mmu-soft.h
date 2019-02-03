@@ -41,8 +41,7 @@ namespace riscv {
 		}
 
 		template <typename P> constexpr bool fetch_access_fault(
-			P &proc, UX privilege_level, addr_t pa,
-			typename tlb_type::tlb_entry_t* tlb_ent)
+			P &proc, UX privilege_level, typename tlb_type::tlb_entry_t* tlb_ent)
 		{
 			/*
 			 * Checks for X=1
@@ -62,8 +61,7 @@ namespace riscv {
 		}
 
 		template <typename P> constexpr bool load_access_fault(
-			P &proc, UX privilege_level, addr_t pa,
-			typename tlb_type::tlb_entry_t* tlb_ent)
+			P &proc, UX privilege_level, typename tlb_type::tlb_entry_t* tlb_ent)
 		{
 			/*
 			 * Checks for R=1 or (X=1 and MXR=1)
@@ -82,8 +80,7 @@ namespace riscv {
 		}
 
 		template <typename P> constexpr bool store_access_fault(
-			P &proc, UX privilege_level, addr_t pa,
-			typename tlb_type::tlb_entry_t* tlb_ent)
+			P &proc, UX privilege_level, typename tlb_type::tlb_entry_t* tlb_ent)
 		{
 			/*
 			 * Checks for W=1
@@ -105,86 +102,107 @@ namespace riscv {
 		inst_t inst_fetch(P &proc, UX pc, typename P::ux &pc_offset)
 		{
 			typename tlb_type::tlb_entry_t* tlb_ent = nullptr;
-			memory_segment<UX> *segment = nullptr;
 			inst_t inst = 0;
+			u16 inst_16;
 
 			/* raise exception if address is misalligned */
 			if (unlikely(misaligned<u16>(pc))) {
 				proc.raise(rv_cause_misaligned_fetch, pc);
+				return 0;
 			}
 
 			/* translate to machine physical (raises exception on fault) */
 			addr_t mpa = translate_addr<P,op>(proc, pc, tlb_ent);
+			if (!mpa) return 0;
 
-			/* translate to user virtual (null segment indicates no mapping) */
-			addr_t uva = mem->mpa_to_uva(segment, mpa);
-
-			/* Check PTE flags */
-			if (unlikely(!segment ||
-				fetch_access_fault(proc, proc.mode, uva, tlb_ent)))
-			{
+			/* check execute permissions and fetch first 16 bits */
+			if (unlikely(fetch_access_fault(proc, proc.mode, tlb_ent) || mem->load(mpa, inst_16))) {
 				proc.raise(rv_cause_fault_fetch, pc);
-			} else {
+				return 0;
+			}
 
-				/* record pc histogram using machine physical address */
-				if (proc.log & proc_log_hist_pc) {
-					proc.histogram_add_pc(mpa);
-				}
+			/* record pc histogram using machine physical address */
+			if (proc.log & proc_log_hist_pc) {
+				proc.histogram_add_pc(mpa);
+			}
 
-				/* fetch instruction using memory segment interface */
-				u32 inst_32;
-				segment->load(uva, inst_32);
-				inst = htole32(inst_32);
-				if ((inst & 0b11) != 0b11) {
-					inst &= 0xffff; // mask to 16-bits
-					pc_offset = 2;
-				} else if ((inst & 0b11100) != 0b11100) {
-					pc_offset = 4;
-				} else if ((inst & 0b111111) == 0b011111) {
-					u16 inst_16;
-					segment->load(uva + 4, inst_16);
-					inst |= inst_t(htole16(inst_16)) << 32;
-					pc_offset = 6;
-				} else if ((inst & 0b1111111) == 0b0111111) {
-					segment->load(uva + 4, inst_32);
-					inst |= inst_t(htole32(inst_32)) << 32;
-					pc_offset = 8;
-				} else {
+			/* decode length and fetch any remaining instruction bytes */
+			inst = htole16(inst_16);
+			if ((inst & 0b11) != 0b11) {
+				pc_offset = 2;
+			} else if ((inst & 0b11100) != 0b11100) {
+				if (unlikely(mem->load(mpa + 2, inst_16))) {
 					proc.raise(rv_cause_fault_fetch, pc);
+					return 0;
 				}
+				inst |= inst_t(htole16(inst_16)) << 16;
+				pc_offset = 4;
+			} else if ((inst & 0b111111) == 0b011111) {
+				if (unlikely(mem->load(mpa + 2, inst_16))) {
+					proc.raise(rv_cause_fault_fetch, pc);
+					return 0;
+				}
+				inst |= inst_t(htole16(inst_16)) << 16;
+				if (unlikely(mem->load(mpa + 4, inst_16))) {
+					proc.raise(rv_cause_fault_fetch, pc);
+					return 0;
+				}
+				inst |= inst_t(htole16(inst_16)) << 32;
+				pc_offset = 6;
+			} else if ((inst & 0b1111111) == 0b0111111) {
+				if (unlikely(mem->load(mpa + 2, inst_16))) {
+					proc.raise(rv_cause_fault_fetch, pc);
+					return 0;
+				}
+				inst |= inst_t(htole16(inst_16)) << 16;
+				if (unlikely(mem->load(mpa + 4, inst_16))) {
+					proc.raise(rv_cause_fault_fetch, pc);
+					return 0;
+				}
+				inst |= inst_t(htole16(inst_16)) << 32;
+				if (unlikely(mem->load(mpa + 6, inst_16))) {
+					proc.raise(rv_cause_fault_fetch, pc);
+					return 0;
+				}
+				inst |= inst_t(htole16(inst_16)) << 48;
+				pc_offset = 8;
+			} else {
+				proc.raise(rv_cause_fault_fetch, pc);
+				return 0;
 			}
 			return inst;
 		}
 
 		/* amo */
-		template <typename P, typename T, const mmu_op op = op_load>
+		template <typename P, typename T, const mmu_op op = op_store>
 		void amo(P &proc, const amo_op a_op, UX va, T &val1, T val2)
 		{
 			typename tlb_type::tlb_entry_t* tlb_ent = nullptr;
-			memory_segment<UX> *segment = nullptr;
 
 			/* raise exception if address is misalligned */
 			if (unlikely(misaligned<T>(va))) {
-				proc.raise(rv_cause_misaligned_load, va);
+				proc.raise(rv_cause_misaligned_store, va);
+				return;
 			}
 
-			/* translate to machine physical (raises exception on fault) */
+			/* translate to physical (raises exception on fault) */
 			addr_t mpa = translate_addr<P,op>(proc, va, tlb_ent);
+			if (!mpa) return;
 
-			/* translate to user virtual (null segment indicates no mapping) */
-			addr_t uva = mem->mpa_to_uva(segment, mpa);
+			/* TODO - plumb amo interface into the memory bus */
 
-			/* Check PTE flags */
-			if (unlikely(!segment ||
-				load_access_fault(proc, proc.mode, uva, tlb_ent)) ||
-				store_access_fault(proc, proc.mode, uva, tlb_ent))
-			{
-				proc.raise(rv_cause_fault_load, va);
-			} else {
-				/* TODO - we need some locking magic for SMP on non RISC-V */
-				segment->load(uva, val1);
-				val2 = amo_fn<UX>(a_op, val1, val2);
-				segment->store(uva, val2);
+			/* Check read permissions and perform load */
+			if (unlikely(load_access_fault(proc, proc.mode, tlb_ent) || mem->load(mpa, val1))) {
+				proc.raise(rv_cause_fault_store, va);
+				return;
+			}
+
+			/* execute atomic op */
+			val2 = amo_fn<UX>(a_op, val1, val2);
+
+			/* Check write permissions and perform store */
+			if (unlikely(store_access_fault(proc, proc.mode, tlb_ent) || mem->store(mpa, val2))) {
+				proc.raise(rv_cause_fault_store, va);
 			}
 		}
 
@@ -193,26 +211,20 @@ namespace riscv {
 		void load(P &proc, UX va, T &val)
 		{
 			typename tlb_type::tlb_entry_t* tlb_ent = nullptr;
-			memory_segment<UX> *segment = nullptr;
 
 			/* raise exception if address is misalligned */
 			if (unlikely(misaligned<T>(va))) {
 				proc.raise(rv_cause_misaligned_load, va);
+				return;
 			}
 
-			/* translate to machine physical (raises exception on fault) */
+			/* translate to physical (raises exception on fault) */
 			addr_t mpa = translate_addr<P,op>(proc, va, tlb_ent);
+			if (!mpa) return;
 
-			/* translate to user virtual (null segment indicates no mapping) */
-			addr_t uva = mem->mpa_to_uva(segment, mpa);
-
-			/* Check PTE flags */
-			if (unlikely(!segment ||
-				load_access_fault(proc, proc.mode, uva, tlb_ent)))
-			{
+			/* check read permissions and perform load */
+			if (unlikely(load_access_fault(proc, proc.mode, tlb_ent)|| mem->load(mpa, val))) {
 				proc.raise(rv_cause_fault_load, va);
-			} else {
-				segment->load(uva, val);
 			}
 		}
 
@@ -221,26 +233,20 @@ namespace riscv {
 		void store(P &proc, UX va, T val)
 		{
 			typename tlb_type::tlb_entry_t* tlb_ent = nullptr;
-			memory_segment<UX> *segment = nullptr;
 
 			/* raise exception if address is misalligned */
 			if (unlikely(misaligned<T>(va))) {
 				proc.raise(rv_cause_misaligned_store, va);
+				return;
 			}
 
-			/* translate to machine physical (raises exception on fault) */
+			/* translate to physical (raises exception on fault) */
 			addr_t mpa = translate_addr<P,op>(proc, va, tlb_ent);
+			if (!mpa) return;
 
-			/* translate to user virtual (null segment indicates no mapping) */
-			addr_t uva = mem->mpa_to_uva(segment, mpa);
-
-			/* Check PTE flags */
-			if (unlikely(!segment ||
-				store_access_fault(proc, proc.mode, uva, tlb_ent)))
-			{
+			/* check write permissions and perform store */
+			if (unlikely(store_access_fault(proc, proc.mode, tlb_ent) || mem->store(mpa, val))) {
 				proc.raise(rv_cause_fault_store, va);
-			} else {
-				segment->store(uva, val);
 			}
 		}
 
@@ -301,13 +307,14 @@ namespace riscv {
 		{
 			tlb_ent = tlb.lookup(proc.pdid, proc.sptbr >> tlb_type::ppn_bits, va);
 			if (tlb_ent) {
-				/* update PTE accessed and dirty flags */
-				update_pte_flags<PTM>(op, tlb_ent->uva);
-
-				return page_translate_offset<PTM>(tlb_ent->ppn, va, tlb_ent->ptel);
-			} else {
-				return page_translate_addr_tlb_miss<P,PTM>(proc, va, op, tlb, tlb_ent);
+				/* check if accessed and dirty flags are up-to-date */
+				uintptr_t ad_flags = pte_flag_A | (op == op_store ? pte_flag_D : 0);
+				if ((tlb_ent->pteb & ad_flags) != ad_flags) {
+					/* rewalk the page table to find the PTE address and update flags */
+					return page_translate_offset<PTM>(tlb_ent->ppn, va, tlb_ent->ptel);
+				}
 			}
+			return page_translate_addr_tlb_miss<P,PTM>(proc, va, op, tlb, tlb_ent);
 		}
 
 		/* translate address using a TLB and a paged addressing mode
@@ -324,39 +331,30 @@ namespace riscv {
 			 */
 
 			typename PTM::pte_type pte;
-			addr_t pte_uva;
 			UX level;
 
 			/* TODO: TLB statistics */
 
 			/* Walk the page table to find a leaf PTE entry
 			 * (access fault is raised if leaf PTE is not found) */
-			addr_t pa = walk_page_table<P,PTM>(proc, va, op, tlb, tlb_ent,
-				pte, pte_uva, level);
+			addr_t pa = walk_page_table<P,PTM>(proc, va, op, tlb, tlb_ent, pte, level);
+			if (!pa) return 0;
 
 			/* Insert the virtual to physical mapping into the TLB */
 			tlb_ent = tlb.insert(proc.pdid, proc.sptbr >> tlb_type::ppn_bits,
-				va, level, pte.val.flags, pte.val.ppn, pte_uva);
+				va, level, pte.val.flags, pte.val.ppn);
 
 			return pa;
 		}
 
-		/* update PTE accessed and dirty */
-		template <typename PTM> void update_pte_flags(mmu_op op, addr_t pte_uva)
-		{
-			typedef typename PTM::pte_type pte_type;
-			pte_type &pte = *(pte_type*)pte_uva;
-			UX update_flags = (op == op_store ? (pte_flag_D | pte_flag_A) : pte_flag_A);
-			if (pte.val.flags != (pte.val.flags | update_flags)) {
-				pte.val.flags |= update_flags;
-			}
-		}
-
 		/* walk the page table to find a PTE for a given virtual address */
 		template <typename P, typename PTM> addr_t walk_page_table(
-			P &proc, UX va, mmu_op op,
-			tlb_type &tlb, typename tlb_type::tlb_entry_t* &tlb_ent,
-			typename PTM::pte_type &pte, addr_t &pte_uva, UX &level)
+			P &proc,
+			UX va,
+			mmu_op op,
+			tlb_type &tlb,
+			typename tlb_type::tlb_entry_t* &tlb_ent,
+			typename PTM::pte_type &pte, UX &level)
 		{
 			typedef typename PTM::pte_type pte_type;
 
@@ -373,11 +371,8 @@ namespace riscv {
 				vpn = (va >> shift) & ((1ULL << PTM::bits) - 1);
 				pte_mpa = ppn + vpn * sizeof(pte_type);
 
-				/* map the ppn into the host address space */
-				memory_segment<UX> *segment = nullptr;
-				pte_uva = mem->mpa_to_uva(segment, pte_mpa);
-				if (!segment) goto fault;
-				segment->load(pte_uva, pte);
+				/* load the PTE from memory */
+				if (unlikely(mem->load(pte_mpa, *(typename PTM::size_type*)&pte))) goto fault;
 
 				/* check if this is a pointer PTE */
 				if ((((pte.xu.val >> pte_shift_R) |
@@ -395,8 +390,16 @@ namespace riscv {
 				/* translate address if we have a valid PTE */
 				if ((pte.val.flags & (pte_flag_R | pte_flag_X))) {
 
-					/* update PTE accessed and dirty flags */
-					update_pte_flags<PTM>(op, pte_uva);
+					/* check for misaligned superpage */
+					if (((1 << (shift - page_shift)) - 1) & pte.val.ppn) goto fault;
+
+					/* check if we need to update PTE accessed and dirty flags */
+					uintptr_t ad_flags = pte_flag_A | (op == op_store ? pte_flag_D : 0);
+					if ((pte.val.flags & ad_flags) != ad_flags) {
+						pte.val.flags |= ad_flags;
+						/* update PTE (note this reall needs to be atomic) */
+						if (unlikely(mem->store(pte_mpa, *(typename PTM::size_type*)&pte))) goto fault;
+					}
 
 					if (proc.log & proc_log_pagewalk) {
 						debug("walk_page_table va=0x%llx sptbr=0x%llx, level=%d "
@@ -425,7 +428,7 @@ namespace riscv {
 				case op_store: proc.raise(rv_cause_fault_store, va);
 			}
 
-			return 0; /* not reached */
+			return 0;
 		}
 	};
 

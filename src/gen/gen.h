@@ -78,6 +78,13 @@ struct rv_gen_map : rv_gen_abstract
 	void generate();
 };
 
+struct rv_gen_markdown : rv_gen_abstract
+{
+	rv_gen_markdown(rv_gen *gen) : rv_gen_abstract(gen) {}
+	std::vector<cmdline_option> get_cmdline_options();
+	void generate();
+};
+
 struct rv_gen_meta : rv_gen_abstract
 {
 	rv_gen_meta(rv_gen *gen) : rv_gen_abstract(gen) {}
@@ -126,11 +133,12 @@ struct rv_codec_node
 template <typename T>
 std::string join(std::vector<T> list, std::string sep)
 {
-	std::stringstream ss;
+	std::string s;
 	for (auto i = list.begin(); i != list.end(); i++) {
-		ss << (i != list.begin() ? sep : "") << *i;
+		if (i != list.begin()) s.append(sep);
+		s.append(*i);
 	}
-	return ss.str();
+	return s;
 }
 
 struct rv_gen : rv_meta_model

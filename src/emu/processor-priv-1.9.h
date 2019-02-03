@@ -257,10 +257,24 @@ namespace riscv {
 		std::shared_ptr<config_mmio_device<processor_privileged>> device_config;
 		std::shared_ptr<string_mmio_device<processor_privileged>> device_string;
 
+		u64 intr_sleep_time, intr_powerdown_delay;
+		std::vector<struct pollfd> pollfds;
+
+		std::mutex intr_mutex;
+		std::condition_variable intr_cond;
+
+		std::string stats_dirname;
+
 		const char* name() { return "rv-sys"; }
 
 		const u64 RTC_FREQ = 10000000;
 		const u64 RTC_DIV = 1000000000 / RTC_FREQ;
+
+		const u64 POWERDOWN_DELAY_INTERRUPT = 30000000;
+		const u64 POWERDOWN_DELAY_DEFAULT = 10000;
+		const u64 POWERDOWN_SLEEP_DEFAULT = 1000000;
+
+		processor_privileged() : intr_sleep_time(0), intr_powerdown_delay(1000), pollfds() {}
 
 		u64 get_time()
 		{
@@ -365,6 +379,97 @@ core {
 			P::mmu.mem->add_segment(device_string);
 		}
 
+		void exit(int rc)
+		{
+			if (P::log & proc_log_exit_log_stats) {
+
+				/* print integer register file */
+				printf("\n");
+				printf("integer register file\n");
+				printf("~~~~~~~~~~~~~~~~~~~~~\n");
+				P::print_int_registers();
+
+				/* print control and status registers */
+				printf("\n");
+				printf("control and status registers\n");
+				printf("~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
+				print_csr_registers();
+
+				/* device registers */
+				printf("\n");
+				printf("io device registers\n");
+				printf("~~~~~~~~~~~~~~~~~~~\n");
+				print_device_registers();
+
+				/* print program counter histogram */
+				if (P::log & proc_log_hist_pc) {
+					printf("\n");
+					printf("program counter histogram\n");
+					printf("~~~~~~~~~~~~~~~~~~~~~~~~~\n");
+					histogram_pc_print(*this, false);
+					printf("\n");
+				}
+
+				/* print register histogram */
+				if (P::log & proc_log_hist_reg) {
+					printf("\n");
+					printf("register usage histogram\n");
+					printf("~~~~~~~~~~~~~~~~~~~~~~~~\n");
+					histogram_reg_print(*this, false);
+				}
+
+				/* print register histogram */
+				if (P::log & proc_log_hist_inst) {
+					printf("\n");
+					printf("instruction usage histogram\n");
+					printf("~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
+					histogram_inst_print(*this, false);
+					printf("\n");
+				}
+			}
+
+			if (P::log & proc_log_exit_save_stats) {
+				if (P::log & proc_log_hist_pc) {
+					std::string filename = stats_dirname + "/" + "hist-pc.csv";
+					histogram_pc_save(*this, filename);
+				}
+				if (P::log & proc_log_hist_reg) {
+					std::string filename = stats_dirname + "/" + "hist-reg.csv";
+					histogram_reg_save(*this, filename);
+				}
+				if (P::log & proc_log_hist_inst) {
+					std::string filename = stats_dirname + "/" + "hist-inst.csv";
+					histogram_inst_save(*this, filename);
+				}
+			}
+		}
+
+		void wait_for_interrupt()
+		{
+			auto &cpu = host_cpu::get_instance();
+
+			/* get time in nanoseconds */
+			u64 t = cpu.get_time_ns();
+
+			/* spin for intr_powerdown_delay after last interrupt */
+			if (t - intr_sleep_time < intr_powerdown_delay) {
+				std::this_thread::yield();
+				return;
+			}
+
+			/* sleep on interrupt condition variable */
+			std::unique_lock<std::mutex> intr_lock(intr_mutex);
+			if (intr_cond.wait_for(intr_lock, std::chrono::nanoseconds
+				(POWERDOWN_SLEEP_DEFAULT)) == std::cv_status::no_timeout)
+			{
+				intr_powerdown_delay = POWERDOWN_DELAY_INTERRUPT;
+			} else {
+				intr_powerdown_delay = POWERDOWN_DELAY_DEFAULT;
+			}
+			intr_lock.unlock();
+			intr_sleep_time = cpu.get_time_ns();
+		}
+
 		void print_device_registers()
 		{
 			device_rtc->print_registers();
@@ -461,35 +566,35 @@ core {
 		{
 			print_status_color();
 
-			printf("%s %s\n",    format_reg("pdid",      P::pdid).c_str(),
-			                     format_reg("mode",      P::mode).c_str());
-			printf("%s %s %s\n", format_reg("mvendorid", P::mvendorid).c_str(),
-			                     format_reg("marchid",   P::marchid).c_str(),
-			                     format_reg("mimpid",    P::mimpid).c_str());
-			printf("%s %s %s\n", format_reg("misa",      P::misa).c_str(),
-			                     format_reg("mhartid",   P::mhartid).c_str(),
-			                     format_reg("mstatus",   P::mstatus).c_str());
-			printf("%s %s %s\n", format_reg("medeleg",   P::medeleg).c_str(),
-			                     format_reg("mideleg",   P::mideleg).c_str(),
-			                     format_reg("mip",       P::mip).c_str());
-			printf("%s %s %s\n", format_reg("mtvec",     P::mtvec).c_str(),
-			                     format_reg("mscratch",  P::mscratch).c_str(),
-			                     format_reg("mie",       P::mie).c_str());
-			printf("%s %s %s\n", format_reg("mepc",      P::mepc).c_str(),
-			                     format_reg("mcause",    P::mcause).c_str(),
-			                     format_reg("mbadaddr",  P::mbadaddr).c_str());
-			printf("%s %s %s\n", format_reg("mbase",     P::mbase).c_str(),
-			                     format_reg("mibase",    P::mibase).c_str(),
-			                     format_reg("mdbase",    P::mdbase).c_str());
-			printf("%s %s %s\n", format_reg("mbound",    P::mbound).c_str(),
-			                     format_reg("mibound",   P::mibound).c_str(),
-			                     format_reg("mdbound",   P::mdbound).c_str());
-			printf("%s %s %s\n", format_reg("stvec",     P::stvec).c_str(),
-			                     format_reg("sscratch",  P::sscratch).c_str(),
-			                     format_reg("sptbr",     P::sptbr).c_str());
-			printf("%s %s %s\n", format_reg("sepc",      P::sepc).c_str(),
-			                     format_reg("scause",    P::scause).c_str(),
-			                     format_reg("sbadaddr",  P::sbadaddr).c_str());
+			printf("%s %s\n", format_reg("pdid",      P::pdid).c_str(),
+			                  format_reg("mode",      P::mode).c_str());
+			printf("%s %s\n", format_reg("mvendorid", P::mvendorid).c_str(),
+			                  format_reg("marchid",   P::marchid).c_str());
+			printf("%s %s\n", format_reg("mimpid",    P::mimpid).c_str(),
+			                  format_reg("misa",      P::misa).c_str());
+			printf("%s %s\n", format_reg("mhartid",   P::mhartid).c_str(),
+			                  format_reg("mstatus",   P::mstatus.xu.val).c_str());
+			printf("%s %s\n", format_reg("medeleg",   P::medeleg).c_str(),
+			                  format_reg("mideleg",   P::mideleg).c_str());
+			printf("%s %s\n", format_reg("mip",       P::mip.xu.val).c_str(),
+			                  format_reg("mie",       P::mie.xu.val).c_str());
+			printf("%s %s\n", format_reg("mscratch",  P::mscratch).c_str(),
+			                  format_reg("mtvec",     P::mtvec).c_str());
+			printf("%s %s\n", format_reg("mepc",      P::mepc).c_str(),
+			                  format_reg("mcause",    P::mcause).c_str());
+			printf("%s %s\n", format_reg("mbadaddr",  P::mbadaddr).c_str(),
+			                  format_reg("mbase",     P::mbase).c_str());
+			printf("%s %s\n", format_reg("mibase",    P::mibase).c_str(),
+			                  format_reg("mdbase",    P::mdbase).c_str());
+			printf("%s %s\n", format_reg("mbound",    P::mbound).c_str(),
+			                  format_reg("mibound",   P::mibound).c_str());
+			printf("%s %s\n", format_reg("mdbound",   P::mdbound).c_str(),
+			                  format_reg("stvec",     P::stvec).c_str());
+			printf("%s %s\n", format_reg("sscratch",  P::sscratch).c_str(),
+			                  format_reg("sptbr",     P::sptbr).c_str());
+			printf("%s %s\n", format_reg("sepc",      P::sepc).c_str(),
+			                  format_reg("scause",    P::scause).c_str());
+			printf("%s\n"   , format_reg("sbadaddr",  P::sbadaddr).c_str());
 
 			P::print_csr_registers();
 		}
@@ -567,11 +672,11 @@ core {
 				                             fcsr_mask, fcsr_mask);
 				                      fenv_clearflags(P::fcsr);
 				                      fenv_setrm((P::fcsr >> 5) & 0x7);                        break;
-				case rv_csr_cycle:    P::get_csr(dec, rv_mode_U, op, csr, P::cycle, value);    break;
+				case rv_csr_cycle:    P::get_csr(dec, rv_mode_U, op, csr, P::instret, value);  break;
 				case rv_csr_time:     P::time = get_time();
 				                      P::get_csr(dec, rv_mode_U, op, csr, P::time, value);     break;
 				case rv_csr_instret:  P::get_csr(dec, P::mode, op, csr, P::instret, value);    break;
-				case rv_csr_cycleh:   P::get_csr_hi(dec, P::mode, op, csr, P::cycle, value);   break;
+				case rv_csr_cycleh:   P::get_csr_hi(dec, P::mode, op, csr, P::instret, value); break;
 				case rv_csr_timeh:    P::get_csr_hi(dec, P::mode, op, csr, P::time, value);    break;
 				case rv_csr_instreth: P::get_csr_hi(dec, P::mode, op, csr, P::instret, value); break;
 				case rv_csr_misa:     P::set_csr(dec, P::mode, op, csr, P::misa, value,
@@ -603,9 +708,9 @@ core {
 				case rv_csr_mibound:  P::set_csr(dec, P::mode, op, csr, P::mibound, value);    break;
 				case rv_csr_mdbase:   P::set_csr(dec, P::mode, op, csr, P::mdbase, value);     break;
 				case rv_csr_mdbound:  P::set_csr(dec, P::mode, op, csr, P::mdbound, value);    break;
-				case rv_csr_mcycle:   P::set_csr(dec, rv_mode_U, op, csr, P::cycle, value);    break;
+				case rv_csr_mcycle:   P::set_csr(dec, rv_mode_U, op, csr, P::instret, value);  break;
 				case rv_csr_minstret: P::set_csr(dec, P::mode, op, csr, P::instret, value);    break;
-				case rv_csr_mcycleh:  P::set_csr_hi(dec, P::mode, op, csr, P::cycle, value);   break;
+				case rv_csr_mcycleh:  P::set_csr_hi(dec, P::mode, op, csr, P::instret, value); break;
 				case rv_csr_minstreth:P::set_csr_hi(dec, P::mode, op, csr, P::instret, value); break;
 				case rv_csr_sstatus:  P::set_csr(dec, P::mode, op, csr, P::mstatus.xu.val, value,
 				                             sstatus_wmask, sstatus_rmask);                    break;
@@ -666,7 +771,7 @@ core {
 					}
 				case rv_op_wfi:
 					if (P::mode >= rv_mode_S) {
-						std::this_thread::yield();
+						wait_for_interrupt();
 						return pc_offset;
 					} else {
 						return -1; /* illegal instruction */
@@ -847,8 +952,7 @@ core {
 
 			/* if reqeusted, terminate and dump register state */
 			if (terminate) {
-				print_csr_registers();
-				P::print_int_registers();
+				exit(0);
 				P::running = false;
 				return;
 			}

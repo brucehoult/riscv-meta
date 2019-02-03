@@ -18,20 +18,29 @@ namespace riscv {
 	/* Register formatter */
 
 	template <typename T>
-	std::string format_reg(std::string name, T &reg)
+	std::string format_reg(std::string name, T &&reg, bool decimal = false)
 	{
-		return
-			sizeof(T) == 4 ? format_string("%-9s:%08x", name.c_str(), reg) :
-			sizeof(T) == 8 ? format_string("%-9s:%016llx", name.c_str(), reg) :
-			format_string("%-8s:<INVALID>", name.c_str(), reg);
+		if (decimal) {
+			return
+				sizeof(T) == 4 ? format_string("%-9s:%10d", name.c_str(), reg) :
+				sizeof(T) == 8 ? format_string("%-9s:%18lld", name.c_str(), reg) :
+				format_string("%-9s:<INVALID>", name.c_str());
+		} else {
+			return
+				sizeof(T) == 4 ? format_string("%-9s:0x%08x", name.c_str(), reg) :
+				sizeof(T) == 8 ? format_string("%-9s:0x%016llx", name.c_str(), reg) :
+				format_string("%-9s:<INVALID>", name.c_str());
+		}
 	}
 
 	/* Processor base template */
 
 	typedef google::dense_hash_map<addr_t,size_t> hist_pc_map_t;
+	typedef google::dense_hash_map<size_t,size_t> hist_reg_map_t;
+	typedef google::dense_hash_map<short,size_t> hist_inst_map_t;
 	typedef std::pair<addr_t,size_t> hist_pc_pair_t;
-	typedef std::map<size_t,size_t> hist_reg_map_t;
 	typedef std::pair<size_t,size_t> hist_reg_pair_t;
+	typedef std::pair<size_t,size_t> hist_inst_pair_t;
 
 	template<typename T, typename P, typename M>
 	struct processor_impl : P
@@ -43,11 +52,15 @@ namespace riscv {
 		mmu_type mmu;
 		hist_pc_map_t hist_pc;
 		hist_reg_map_t hist_reg;
+		hist_inst_map_t hist_inst;
+		std::function<const char*(addr_t)> symlookup;
 
 		processor_impl() : P()
 		{
 			hist_pc.set_empty_key(0);
 			hist_pc.set_deleted_key(-1);
+			hist_reg.set_empty_key(-1);
+			hist_inst.set_empty_key(-1);
 		}
 
 		std::string format_inst(inst_t inst)
@@ -120,6 +133,14 @@ namespace riscv {
 			}
 		}
 
+		void histogram_add_inst(decode_type &dec)
+		{
+			size_t op = dec.op;
+			auto hi = hist_inst.find(op);
+			if (hi == hist_inst.end()) hist_inst.insert(hist_inst_pair_t(op, 1));
+			else hi->second++;
+		}
+
 		void seed_registers(host_cpu &cpu, uint64_t initial_seed, size_t n)
 		{
 			sha512_ctx_t sha512;
@@ -164,18 +185,18 @@ namespace riscv {
 		{
 			size_t reg;
 			std::string op;
-			std::vector<std::string> ops;
+			std::map<std::string,std::string> ops;
 			const rv_operand_data *operand_data = rv_inst_operand_data[dec.op];
 			while (operand_data->type != rv_type_none) {
 				op.clear();
 				switch (operand_data->type) {
 					case rv_type_ireg:
 						reg = regnum(dec, operand_data->operand_name);
-						sprintf(op, "%s=0x", rv_ireg_name_sym[reg]);
+						sprintf(op, "0x");
 						sprintf(op,
 							rv_type_primitives[operand_data->primitive].hex_format,
 							P::ireg[reg].r.xu.val);
-						ops.push_back(op);
+						ops[rv_ireg_name_sym[reg]] = op;
 						break;
 					case rv_type_freg:
 						reg = regnum(dec, operand_data->operand_name);
@@ -199,7 +220,7 @@ namespace riscv {
 								operand_data->primitive == rv_primitive_f64 ?
 								P::freg[reg].r.d.val : P::freg[reg].r.s.val);
 						}
-						ops.push_back(op);
+						ops[rv_freg_name_sym[reg]] = op;
 						break;
 					default: break;
 				}
@@ -208,9 +229,12 @@ namespace riscv {
 
 			std::string operands;
 			for (auto i = ops.begin(); i != ops.end(); i++) {
-				operands.append((i == ops.begin() ? "(" : ", "));
-				operands.append(*i);
-				operands.append((i == ops.end() - 1 ? ")" : ""));
+				if (i != ops.begin()) {
+					operands.append(", ");
+				}
+				operands.append(i->first);
+				operands.append("=");
+				operands.append(i->second);
 			}
 			return operands;
 		}
@@ -221,10 +245,12 @@ namespace riscv {
 			static const char *fmt_64 = "%019llu core-%-4zu:%016llx (%s) %-30s %s\n";
 			static const char *fmt_128 = "%019llu core-%-4zu:%032llx (%s) %-30s %s\n";
 			if (P::log & proc_log_hist_reg) histogram_add_regs(dec);
+			if (P::log & proc_log_hist_inst) histogram_add_inst(dec);
 			if (P::log & proc_log_inst) {
 				std::fexcept_t flags;
 				fegetexceptflag(&flags, FE_ALL_EXCEPT);
 				if (!(P::log & proc_log_no_pseudo)) decode_pseudo_inst(dec);
+				if (symlookup) printf("%32s ", symlookup(P::pc));
 				std::string args = disasm_inst_simple(dec);
 				std::string op_args = (P::log & proc_log_operands) ? format_operands(dec) : std::string();
 				printf(P::xlen == 32 ? fmt_32 : P::xlen == 64 ? fmt_64 : fmt_128,
@@ -238,11 +264,10 @@ namespace riscv {
 
 		void print_csr_registers()
 		{
-			printf("%s %s %s\n", format_reg("cycle", P::cycle).c_str(),
-			                     format_reg("instret", P::instret).c_str(),
-			                     format_reg("time", P::time).c_str());
-			printf("%s %s\n",    format_reg("pc", P::pc).c_str(),
-			                     format_reg("fcsr", P::fcsr).c_str());
+			printf("%s %s\n", format_reg("instret", P::instret, true).c_str(),
+			                  format_reg("time", P::time).c_str());
+			printf("%s %s\n", format_reg("pc", P::pc).c_str(),
+			                  format_reg("fcsr", P::fcsr).c_str());
 		}
 
 		void print_int_registers()
@@ -250,7 +275,7 @@ namespace riscv {
 			for (size_t i = rv_ireg_x1; i < P::ireg_count; i++) {
 				printf("%s%s", format_reg(rv_ireg_name_sym[i],
 					P::ireg[i].r.xu.val).c_str(), /* 3 column layout */
-					((i - 1) % 3) == 0 ? "\n" : ((i - 1) % 3) > 0 ? " " : "");
+					((i - 1) % 2) == 0 ? "\n" : ((i - 1) % 2) > 0 ? " " : "");
 			}
 		}
 

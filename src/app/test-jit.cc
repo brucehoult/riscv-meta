@@ -30,18 +30,22 @@
 #include <atomic>
 #include <type_traits>
 
-#include <sparsehash/dense_hash_map>
+#include "dense_hash_map"
 
 #include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <libgen.h>
 #include <termios.h>
+#include <sys/uio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/time.h>
+#include <sys/times.h>
+#include <sys/ioctl.h>
 #include <sys/utsname.h>
-
-#include "histedit.h"
+#include <sys/resource.h>
 
 #include "host-endian.h"
 #include "types.h"
@@ -53,9 +57,11 @@
 #include "util.h"
 #include "host.h"
 #include "cmdline.h"
-#include "config-parser.h"
-#include "config-string.h"
+#include "color.h"
 #include "codec.h"
+#include "elf.h"
+#include "elf-file.h"
+#include "elf-format.h"
 #include "strings.h"
 #include "disasm.h"
 #include "alu.h"
@@ -68,7 +74,9 @@
 #include "interp.h"
 #include "processor-model.h"
 #include "mmu-proxy.h"
+#include "mmap-core.h"
 #include "unknown-abi.h"
+#include "processor-histogram.h"
 #include "processor-proxy.h"
 #include "debug-cli.h"
 
@@ -78,6 +86,8 @@
 #include "jit-emitter-rv32.h"
 #include "jit-emitter-rv64.h"
 #include "jit-fusion.h"
+#include "jit-tracer.h"
+#include "jit-regalloc.h"
 #include "jit-runloop.h"
 
 #include "assembler.h"
@@ -87,19 +97,22 @@ using namespace riscv;
 
 using proxy_model_rv32imafdc = processor_rv32imafdc_model<
 	jit_decode, processor_rv32imafd, mmu_proxy_rv32>;
-using proxy_jit_rv32imafdc = jit_runloop<
-	processor_proxy<proxy_model_rv32imafdc>,
-	jit_fusion<jit_emitter_rv32<proxy_model_rv32imafdc>>>;
-
 using proxy_model_rv64imafdc = processor_rv64imafdc_model<
 	jit_decode, processor_rv64imafd, mmu_proxy_rv64>;
+
+using proxy_jit_rv32imafdc = jit_runloop<
+	processor_proxy<proxy_model_rv32imafdc>,
+	jit_tracer<proxy_model_rv32imafdc,jit_isa_rv32>,
+	jit_emitter_rv32<proxy_model_rv32imafdc>>;
 using proxy_jit_rv64imafdc = jit_runloop<
 	processor_proxy<proxy_model_rv64imafdc>,
-	jit_fusion<jit_emitter_rv64<proxy_model_rv64imafdc>>>;
+	jit_tracer<proxy_model_rv64imafdc,jit_isa_rv64>,
+	jit_emitter_rv64<proxy_model_rv64imafdc>>;
 
 template <typename P>
 struct rv_test_jit
 {
+	bool memory_registers = false;
 	int total_tests = 0;
 	int tests_passed = 0;
 
@@ -132,6 +145,7 @@ struct rv_test_jit
 
 		/* compile the program buffer trace */
 		printf("\n--[ jit ]------------------\n");
+		proc.memory_registers = memory_registers;
 		proc.log = proc_log_jit_trace;
 		proc.pc = pc;
 		proc.jit_trace();
@@ -1906,9 +1920,9 @@ struct rv_test_jit
 	}
 };
 
-int main(int argc, char *argv[])
+template <typename T>
+void test(T &test)
 {
-	rv_test_jit<proxy_jit_rv64imafdc> test;
 	test.test_addi_1();
 	test.test_addi_2();
 	test.test_addi_3();
@@ -2024,4 +2038,13 @@ int main(int argc, char *argv[])
 	test.test_sb_lbu_3();
 	test.test_sb_lbu_4();
 	test.print_summary();
+}
+
+int main(int argc, char *argv[])
+{
+	rv_test_jit<proxy_jit_rv64imafdc> proc;
+	if (argc == 2 && strcmp(argv[1], "-M") == 0) {
+		proc.memory_registers = true;
+	}
+	test(proc);
 }

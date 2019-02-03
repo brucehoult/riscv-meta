@@ -1,49 +1,150 @@
-RISC-V Meta
+rv8
 ===========
 
-[![Build Status](https://travis-ci.org/michaeljclark/riscv-meta.svg?branch=master)](https://travis-ci.org/michaeljclark/riscv-meta)
+RISC-V simulator for x86-64
 
-Date    : January 15, 2020
+[![Build Status](https://travis-ci.org/rv8-io/rv8.svg?branch=master)](https://travis-ci.org/rv8-io/rv8)
+[![Coverity Status](https://img.shields.io/coverity/scan/13148.svg)](https://scan.coverity.com/projects/rv8-io-rv8)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=TKDFDG65GCXD2)
 
-Version : (under version control)
+**rv8** is a RISC-V simulation suite comprising a high performance x86-64 binary translator, a user mode simulator, a full system emulator, an ELF binary analysis tool and ISA metadata:
 
-About
--------------
+* **rv-jit** - _user mode x86-64 binary translator_
+* **rv-sim** - _user mode system call proxy simulator_
+* **rv-sys** - _full system emulator with soft MMU_
+* **rv-bin** - _ELF disassembler and histogram tool_
+* **rv-meta** - _code and documentation generator_
 
-RISC-V Meta is a suite of tools that operate on RISC-V Instruction
-Set Architecture.
+The rv8 simulator suite contains libraries and command line tools for creating instruction opcode maps, C headers and source containing instruction set metadata, instruction decoders, a JIT assembler, LaTeX documentation, a metadata based RISC-V disassembler, a histogram tool for generating statistics on RISC-V ELF executables, a RISC-V proxy syscall simulator, a RISC-V full system emulator that implements the RISC-V 1.9.1 privileged specification and an x86-64 binary translator.
 
-The suite contains simple decoupled libraries and command line tools
-for creating instruction opcode maps, C headers and source containing
-instruction set metadata, instruction decoders, a JIT assembler, LaTeX
-documentation, a metadata based RISC-V disassembler, a histogram tool
-for generating statistics on RISC-V ELF executables, a RISC-V proxy
-syscall simulator and a RISC-V full system emulator that implements
-the RISC-V 1.9.1 privileged specification.
+![rv8 binary translation](/doc/images/bintrans.png)
 
-RISC-V Meta is the starting point for a RISC-V binary translation and
-security sandboxing investigation.
+_**RISC-V to x86-64 binary translator**_
 
-The future goals of the RISC-V Meta project are:
+The rv8 binary translation engine works by interpreting code while profiling it for hot paths. Hot paths are translated on the fly to native code. The translation engine maintains a call stack to allow runtime inlining of hot functions. A jump target cache is used to accelerate returns and indirect calls through function pointers. The translator supports hybrid binary translation and interpretation to handle instructions that do not have native translations. Currently ‘IM’ code is translated and ‘AFD’ is interpreted. The translator supports RVC compressed code.
+
+The rv8 binary translator supports a number of simple optimisations:
+
+- Hybrid interpretation and compilation of hot code paths
+- Incremental translation with dynamic trace linking
+- Inline caching of function calls in hot code paths
+- L1 jump target cache for indirect calls and returns
+- Macro-op fusion for common RISC-V instruction sequences
+
+_**RISC-V full system emulator**_
+
+The rv8 suite includes a full system emulator that implements the RISC-V privileged ISA with support for interrupts, MMIO (memory mapped input output) devices, a soft MMU (memory management unit) with separate instruction and data TLBs (translation lookaside buffers). The full system emulator has a simple integrated debugger that allows setting breakpoints, single stepping and disassembling instructions as they are executed.
+
+The rv8 full system emulator has the following features:
+
+- RISC-V IMAFD Base plus Privileged ISA (riscv32 and riscv64)
+- Simple integrated debug command line interface
+- Histograms (registers, instruction and program counter frequency)
+- Soft MMU supporting sv32, sv39, sv48 page translation modes
+- Abstract MMIO device interface for device emulation
+- Extensible interpreter generated from ISA metadata
+- Protected address space
+
+_**RISC-V user mode simulator**_
+
+The rv8 user mode simulator is a single address space implementation of the RISC-V ISA that implements a subset of the RISC-V Linux syscall ABI (application binary interface) and delegates system calls to the underlying native host operating system. The user mode simulator can run RISC-V Linux binaries on non-Linux operating systems via system call emulation. The current user mode simulator implements a small number of system calls to allow running RISC-V Linux ELF static binaries.
+
+The rv8 user mode simulator has the following features:
+
+- RISC-V IMAFD Base ISA (riscv32 and riscv64)
+- Simple integrated debug command line interface
+- A small set of emulated Linux system calls for simple file IO
+- Extensible interpreter generated from ISA metadata
+- Instruction logging mode for tracing program execution
+- Shared address space
+  - `0x000000000000 - 0x000000000fff` (zero)
+  - `0x000000001000 - 0x7ffdffffffff` (guest)
+  - `0x7ffe00000000 - 0x7fffffffffff` (host)
+
+## Project Goals
+
+The future goals of the rv8 project are:
 
 - Concise metadata representing the RISC-V ISA
 - Tools for metadata-based generation of source and documentation 
-- Full color disassembler
-- ELF Binary compressor, decompressor
 - High performance emulation, sandboxing and binary translation
 - RISC-V-(n) → RISC-V-(n+1)
-- RISC-V-(n) → Intel i786 + AVX-512
+- RISC-V-(n) → Intel i7 / AMD64 + AVX-512
 - RISC-V Linux ABI emulation on MacOS, Windows, Linux and *BSD
 - RISC-V Linux ABI randomisation and entropy coding
 - RISC-V Specification undefined behaviour investigation
 - RISC-V Virtualization and memory protection investigation
-- RISC-V [Crypto Binary Translation](doc/src/bintrans.md)
 
-See [RISC-V Instruction Set Listing](/doc/pdf/riscv-instructions.pdf) and
-[RISC-V Instruction Types](/doc/pdf/riscv-types.pdf) for sample LaTeX output.
 
-Screenshots
-----------------
+## Supported Platforms
+
+- Target
+  - RV32IMAFDC
+  - RV64IMAFDC
+  - Privilged ISA 1.9.1
+- Host
+  - Linux (Debian 9.0 x86-64, Ubuntu 16.04 x86-64, Fedora 25 x86-64) _(stable)_
+  - macOS (Sierra 10.11 x86-64) _(stable)_
+  - FreeBSD (11 x86-64) _(alpha)_
+
+
+## Getting Started
+
+_Building riscv-gnu-toolchain_
+
+```
+$ sudo apt-get install autoconf automake autotools-dev curl libmpc-dev libmpfr-dev libgmp-dev gawk build-essential bison flex texinfo gperf libtool patchutils bc zlib1g-dev
+$ git clone https://github.com/riscv/riscv-gnu-toolchain.git
+$ cd riscv-gnu-toolchain
+$ git submodule update --init --recursive
+$ ./configure --prefix=/opt/riscv/toolchain
+$ make
+```
+
+_Building rv8_
+
+```
+$ export RISCV=/opt/riscv/toolchain
+$ git clone https://github.com/rv8-io/rv8.git
+$ cd rv8
+$ git submodule update --init --recursive
+$ make
+$ sudo make install
+```
+
+_Running rv8_
+
+```
+$ make test-build
+$ rv-jit build/riscv64-unknown-elf/bin/test-dhrystone
+```
+
+
+## Build Dependencies
+
+- gmake
+- gcc-5.4 or clang-3.4 (Linux minimum)
+- gcc-6.3 or clang-3.8 (Linux recommended)
+- RISC-V GNU Toolchain
+- RISCV environment variable
+
+
+### Ubuntu 14.04LTS Dependencies
+
+The compiler in Ubuntu 14.04LTS doesn't support C++14. These
+instructions will install g++6 from the ubuntu toolchain repository
+and build the project using g++6.
+
+```
+sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+sudo apt-get update
+sudo apt-get install g++-6
+make CXX=g++-6 CC=gcc-6
+```
+
+
+## Screenshots
 
 ![ASCII map screenshot](/doc/images/screenshot-1.png)
 
@@ -61,36 +162,34 @@ Screenshots
 
 *Example Disassembly output from `rv-bin dump`*
 
-Tools
------------------
+See [RISC-V Instruction Set Listing](/doc/pdf/riscv-instructions.pdf) and
+[RISC-V Instruction Types](/doc/pdf/riscv-types.pdf) for sample LaTeX output.
 
-The following table shows the RISC-V Meta tools:
 
-|Name    | Description
-|:------ | :-----------------
-|rv-asm  | Assembler
-|rv-meta | Code and documentation generator
-|rv-bin  | ELF dump, disassmble, compress and histogram
-|rv-sim  | ABI Proxy Simulator
-|rv-sys  | Privileged System Emulator
+## Useful Commands
 
-Libraries
------------------
+Command                | Description
+----                   | ---
+```make map```         | print a colour opcode map
+```make latex```       | output a LaTeX opcode tex
+```make pdf```         | output a LaTeX opcode pdf
+```make test-spike```  | run the ABI Proxy Simulator tests with _`spike`_
+```make test-sim```    | run the ABI Proxy Simulator tests with _`rv-sim`_
+```make qemu-tests```  | run the QEMU tests with _`rv-sim`_
+```make test-sys```    | run the Privileged System Emulator tests with _`rv-sys`_
+```make linux```       | bootstrap bbl, linux kernel and busybox image
+```sudo make install```| install to `/usr/local/bin`
 
-The following table shows the RISC-V Meta libraries:
+**Notes**
 
-| Name                | Description                             | Scale
-| :------------------ | :-------------------------------------- | :----
-| `libriscv_asm.a`    | ISA metadata and disassembly formatting | micro
-| `libriscv_crypto.a` | Cryptographic functions                 | micro
-| `libriscv_elf.a`    | ELF parser                              | micro
-| `libriscv_fmt.a`    | String formatting                       | micro
-| `libriscv_gen.a`    | Source and documentation generators     | macro
-| `libriscv_model.a`  | Instruction set metamodel               | macro
-| `libriscv_util.a`   | Utility functions for tools             | mini
+- The `linux` target requires the RISC-V GNU Linux Toolchain
+- The `test-build` target requires the RISC-V ELF Toolchain
+- The `qemu-tests` target requires the `third_party/qemu-tests` to be built
 
-Project Structure
------------------------
+
+## Project Structure
+
+### Directories
 
 | Directory    | Description
 | :----------- | :---------------
@@ -98,10 +197,8 @@ Project Structure
 | `src/abi`    | Application binary interface
 | `src/app`    | Test programs and utilities
 | `src/asm`    | Assembler metadata library
-| `src/crypto` | Cryptographic function library
 | `src/elf`    | ELF parser library
 | `src/emu`    | ISA simulator and emulator headers
-| `src/fmt`    | String formatting library
 | `src/mem`    | Memory allocator library
 | `src/model`  | ISA metamodel library
 | `src/rom`    | Boot ROM generator
@@ -109,69 +206,128 @@ Project Structure
 | `src/util`   | Miscellaneous utilities library
 | `doc/pdf`    | Generated documentation
 
-Dependencies
------------------
+### Libraries
 
-- gmake
-- gcc-5.4 or clang-3.4
-- ragel (required to regenerate config grammar)
-- riscv-gnu-toolchain (required for `make test-sim`)
-- Note: Set RISCV environment variable to point to toolchain
+The following table shows the RISC-V Meta libraries:
 
-Supported Platforms
------------------------------
+| Name                | Description                             | Scale
+| :------------------ | :-------------------------------------- | :----
+| `libriscv_asm.a`    | ISA metadata and disassembly formatting | micro
+| `libriscv_elf.a`    | ELF parser                              | micro
+| `libriscv_gen.a`    | Source and documentation generators     | macro
+| `libriscv_model.a`  | Instruction set metamodel               | macro
+| `libriscv_util.a`   | Utility functions for tools             | mini
 
-- Linux
-- macOS
-- FreeBSD
-- Windows Services for Linux
 
-Build Instructions
------------------------------
+## Program Options
 
-The meta compiler has been tested on Linux, Darwin and FreeBSD.
+### RISC-V x86-64 Simulator
 
-To checkout submodules: ```git submodule update --init --recursive```
+RISC-V x86-64 JIT Simulator command line options:
 
-To build the utilities, simulator, emulator and tests: ```make all test-build```
-
-To print a colour opcode map: ```make map```
-
-To output a LaTeX opcode tex: ```make latex```
-
-To output a LaTeX opcode pdf: ```make pdf```
-
-To run the ABI Proxy Simulator tests with _`spike`_: ```make test-spike```
-
-To run the ABI Proxy Simulator tests with _`rv-sim`_: ```make test-sim```
-
-To run the QEMU tests with _`rv-sim`_: ```make qemu-tests```
-
-To run the Privileged System Emulator tests with _`rv-sys`_: ```make test-sys```
-
-To bootstrap bbl, linux kernel and busybox image: ```make linux```
-
-To install to `/usr/local/bin`: ```make && sudo make install```
+```
+$ rv-jit -h
+usage: rv-jit [<emulator_options>] [--] <elf_file> [<options>]
+            --log-instructions, -l            Log Instructions
+                --log-operands, -o            Log Instructions and Operands
+                 --symbolicate, -S            Symbolicate addresses in instruction log
+              --log-memory-map, -m            Log Memory Map Information
+                --log-syscalls, -c            Log System Calls
+               --log-registers, -r            Log Registers (defaults to integer registers)
+               --log-jit-trace, -T            Log JIT trace
+            --log-jit-regalloc, -T            Log JIT register allocation
+              --log-exit-stats, -E            Log Registers and Statistics at Exit
+             --save-exit-stats, -D <string>   Save Registers and Statistics at Exit
+          --pc-usage-histogram, -P            Record program counter usage
+    --register-usage-histogram, -R            Record register usage
+ --instruction-usage-histogram, -I            Record instruction usage
+                       --debug, -d            Start up in debugger CLI
+                   --no-pseudo, -x            Disable Pseudoinstruction decoding
+                   --no-fusion, -N            Disable JIT macro-op fusion
+     --memory-mapped-registers, -M            Disable JIT host register mapping
+              --update-instret, -i            Update instret in JIT code
+                    --no-trace, -t            Disable JIT tracer
+                       --audit, -a            Enable JIT audit
+                 --trace-iters, -I <string>   Trace iterations
+                        --seed, -s <string>   Random seed
+                        --help, -h            Show help
+```
 
 **Notes**
 
-- The test-build target requires the RISC-V GNU Compiler Toolchain
+- Currently only the Linux syscall ABI proxy is implemented for the JIT simulator
 
-### Ubuntu 14.04LTS Dependencies
 
-The compiler in Ubuntu 14.04LTS doesn't support C++14. These
-instructions will install g++6 from the ubuntu toolchain repository
-and build the project using g++6.
+### RISC-V Proxy Simulator
+
+The ABI Proxy Simulator command line options:
 
 ```
-sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
-sudo apt-get update
-sudo apt-get install g++-6 libncurses5-dev
-make CXX=g++-6 CC=gcc-6
+$ rv-sim -h
+usage: rv-sim [<emulator_options>] [--] <elf_file> [<options>]
+            --log-instructions, -l            Log Instructions
+                --log-operands, -o            Log Instructions and Operands
+                 --symbolicate, -S            Symbolicate addresses in instruction log
+              --log-memory-map, -m            Log Memory Map Information
+                --log-syscalls, -c            Log System Calls
+               --log-registers, -r            Log Registers (defaults to integer registers)
+              --log-exit-stats, -E            Log Registers and Statistics at Exit
+             --save-exit-stats, -D <string>   Save Registers and Statistics at Exit
+          --pc-usage-histogram, -P            Record program counter usage
+    --register-usage-histogram, -R            Record register usage
+ --instruction-usage-histogram, -I            Record instruction usage
+                       --debug, -d            Start up in debugger CLI
+                   --no-pseudo, -x            Disable Pseudoinstruction decoding
+                        --seed, -s <string>   Random seed
+                        --help, -h            Show help
 ```
 
-RV ELF Dump Utility
------------------------------
+To run the simple Hello World program (Proxy Mode):
+
+```
+rv-sim build/riscv64-unknown-elf/bin/hello-world-libc
+```
+
+
+### RISC-V Full System Emulator
+
+The Privilged ISA Full System Emulator command line options:
+
+```
+$ rv-sys -h
+usage: rv-sys [<options>] <elf_file>
+            --log-instructions, -l            Log Instructions
+                --log-operands, -o            Log Instructions and Operands
+                    --log-mmio, -O            Log Memory Mapped IO
+              --log-memory-map, -m            Log Memory Map Information
+               --log-mmode-csr, -M            Log Machine Control and Status Registers
+               --log-smode-csr, -S            Log Supervisor Control and Status Registers
+               --log-registers, -r            Log Registers (defaults to integer registers)
+               --log-pagewalks, -v            Log Pagewalks
+                  --log-config, -c            Log Config
+                   --log-traps, -t            Log Traps
+              --log-exit-stats, -E            Log Registers and Statistics at Exit
+             --save-exit-stats, -D <string>   Save Registers and Statistics at Exit
+          --pc-usage-histogram, -P            Record program counter usage
+    --register-usage-histogram, -R            Record register usage
+ --instruction-usage-histogram, -I            Record instruction usage
+                       --debug, -d            Start up in debugger
+                  --debug-trap, -T            Start up in debugger and enter debugger on trap
+                   --no-pseudo, -x            Disable Pseudoinstruction decoding
+                --map-physical, -p <string>   Map execuatable at physical address
+                      --binary, -b <string>   Boot Binary ( 32, 64 )
+                        --seed, -s <string>   Random seed
+                        --help, -h            Show help
+```
+
+To run the privilged UART echo program (Privileged Mode):
+
+```
+rv-sys build/riscv64-unknown-elf/bin/test-m-mmio-uart
+```
+
+
+### RISC-V ELF Dump Utility
 
 ELF Dump usage command line options:
 
@@ -203,8 +359,37 @@ rv-bin dump -c -a build/riscv64-unknown-elf/bin/hello-world-pcrel
 - The ELF dissassembler output requires 125 column terminal window
 
 
-RV Metadata Utility
------------------------------
+### RISC-V ELF Histogram Utility
+
+The ELF Histogram Utility usage command line options:
+
+```
+$ rv-bin histogram -h
+usage: histogram [<options>] <elf_file>
+                        --help, -h            Show help
+                        --char, -c <string>   Character to use in bars
+                        --bars, -b            Print bars next to counts
+                --instructions, -I            Instruction Usage Histogram
+                   --registers, -R            Register Usage Histogram
+          --registers-operands, -P            Register Usage Histogram (with operand positions)
+                   --max-chars, -m <string>   Maximum number of characters for bars
+                --reverse-sort, -r            Sort in Reverse
+```
+
+To print the top 20 instructions in a RISC-V ELF binary:
+
+```
+rv-bin histogram -I -b -c █ linux/vmlinux | head -20
+```
+
+To print the top 20 registers in a RISC-V ELF binary:
+
+```
+rv-bin histogram -R -b -c █ linux/vmlinux | head -20
+```
+
+
+### RISC-V Metadata Utility
 
 The RV source and documentation generator usage command line options:
 
@@ -228,6 +413,7 @@ usage: rv-meta [<options>]
                    --print-map, -m            Print instruction map
       --print-map-pseudocode-c, -mc           Print instruction map with C pseudocode
     --print-map-pseudocode-alt, -ma           Print instruction map with alternate pseudocode
+              --print-markdown, -md           Print instruction reference in markdown
                 --print-meta-h, -H            Print metadata header
                --print-meta-cc, -C            Print metadata source
             --print-operands-h, -A            Print operands header
@@ -261,108 +447,13 @@ rv-meta -I RV64G -l -r meta
 ```
 
 
-RV Proxy Simulator
------------------------------
-
-The ABI Proxy Simulator command line options:
-
-```
-$ rv-sim -h
-usage: rv-sim [<options>] <elf_file>
-                         --isa, -i <string>   ISA Extensions (IMA, IMAC, IMAFD, IMAFDC)
-            --log-instructions, -l            Log Instructions
-                --log-operands, -o            Log Instructions and Operands
-              --log-memory-map, -m            Log Memory Map Information
-               --log-registers, -r            Log Registers (defaults to integer registers)
-                       --debug, -d            Start up in debugger CLI
-                   --no-pseudo, -x            Disable Pseudoinstruction decoding
-                        --seed, -s <string>   Random seed
-                        --help, -h            Show help
-```
-
-To run the simple Hello World program (Proxy Mode):
-
-```
-rv-sim build/riscv64-unknown-elf/bin/hello-world-libc
-```
-
-
-RV System Emulator
------------------------------
-
-The Privilged ISA System Emulator command line options:
-
-```
-$ rv-sys -h
-usage: rv-sys [<options>] <elf_file>
-            --log-instructions, -l            Log Instructions
-                --log-operands, -o            Log Instructions and Operands
-                    --log-mmio, -O            Log Memory Mapped IO
-              --log-memory-map, -m            Log Memory Map Information
-               --log-mmode-csr, -M            Log Machine Control and Status Registers
-               --log-hmode-csr, -H            Log Hypervisor Control and Status Registers
-               --log-smode-csr, -S            Log Supervisor Control and Status Registers
-               --log-umode-csr, -U            Log User Control and Status Registers
-               --log-registers, -r            Log Registers (defaults to integer registers)
-               --log-pagewalks, -v            Log Pagewalks
-                   --log-traps, -t            Log Traps
-    --register-usage-histogram, -H            Record register usage
-          --pc-usage-histogram, -J            Record program counter usage
-                       --debug, -d            Start up in debugger
-                  --debug-trap, -T            Start up in debugger and enter debugger on trap
-                   --no-pseudo, -x            Disable Pseudoinstruction decoding
-                --map-physical, -p <string>   Map execuatable at physical address
-                         --bbl, -b <string>   BBL Boot ( 32, 64 )
-                        --seed, -s <string>   Random seed
-                        --help, -h            Show help
-```
-
-To run the privilged UART echo program (Privileged Mode):
-
-```
-rv-sys build/riscv64-unknown-elf/bin/test-m-mmio-uart
-```
-
-
-RV ELF Histogram Utility
--------------------------------------
-
-The ELF Histogram Utility usage command line options:
-
-```
-$ rv-bin histogram -h
-usage: histogram [<options>] <elf_file>
-                        --help, -h            Show help
-                        --char, -c <string>   Character to use in bars
-                        --bars, -b            Print bars next to counts
-                --instructions, -I            Instruction Usage Histogram
-                   --registers, -R            Register Usage Histogram
-          --registers-operands, -P            Register Usage Histogram (with operand positions)
-                   --max-chars, -m <string>   Maximum number of characters for bars
-                --reverse-sort, -r            Sort in Reverse
-```
-
-To print the top 20 instructions in a RISC-V ELF binary:
-
-```
-rv-bin histogram -I -b -c █ linux/vmlinux | head -20
-```
-
-To print the top 20 registers in a RISC-V ELF binary:
-
-```
-rv-bin histogram -R -b -c █ linux/vmlinux | head -20
-```
-
-References
-----------------
+### References
 
 - [lowRISC project](http://www.lowrisc.org/)
 - [Native Client x86-64 Sandbox](https://developer.chrome.com/native-client/reference/sandbox_internals/x86-64-sandbox)
 - [Native Client ARM 32-bit Sandbox](https://developer.chrome.com/native-client/reference/sandbox_internals/arm-32-bit-sandbox)
 - [Design of the RISC-V Instruction Set Architecture](http://www.eecs.berkeley.edu/~waterman/papers/phd-thesis.pdf)
 - [RISC-V ISA Specification](http://riscv.org/specifications/)
-- [RISC-V Compressed ISA Specification](http://riscv.org/specifications/compressed-isa/)
 - [RISC-V Privileged ISA Specification](http://riscv.org/specifications/privileged-isa/)
 - [RISC-V ISA Simulator](https://github.com/riscv/riscv-isa-sim/)
 - [RISC-V Opcodes](https://github.com/riscv/riscv-opcodes/)
@@ -374,6 +465,8 @@ References
 - [Bit Twiddling Hacks](https://graphics.stanford.edu/~seander/bithacks.html)
 - [The Netwide Assembler](http://repo.or.cz/nasm.git)
 - [Complete x86/x64 JIT and Remote Assembler for C++](https://github.com/kobalicek/asmjit/)
+- [The Renewed Case for the Reduced Instruction Set - Macro-Op Fusion for RISC-V](https://people.eecs.berkeley.edu/~krste/papers/EECS-2016-130.pdf)
+- [An Approach for Implementing Efficient Superscalar CISC Processors](http://pharm.ece.wisc.edu/papers/HPCA2006.pdf)
 - [Optimizing Binary Translation of Dynamically Generated Code](http://plrg.eecs.uci.edu/publications/cgo15.pdf)
 - [Live Range Hole Allocation in Dynamic Binary Translation](http://amas-bt.cs.virginia.edu/2011proceedings/amasbt2011-p2.pdf)
 - [Dynamic Re-compilation of Binary RISC Code for CISC Architectures](https://www.weihenstephan.org/~michaste/down/steil-recompilation.pdf)

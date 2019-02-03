@@ -15,6 +15,9 @@ struct rv_extension;
 struct rv_format;
 struct rv_register;
 struct rv_csr;
+struct rv_csr_field;
+struct rv_opcode_major;
+struct rv_opcode_class;
 struct rv_opcode;
 struct rv_constraint;
 struct rv_compressed;
@@ -49,8 +52,15 @@ typedef std::map<std::string,rv_register_ptr> rv_register_map;
 typedef std::shared_ptr<rv_csr> rv_csr_ptr;
 typedef std::vector<rv_csr_ptr> rv_csr_list;
 typedef std::map<std::string,rv_csr_ptr> rv_csr_map;
+typedef std::shared_ptr<rv_csr_field> rv_csr_field_ptr;
+typedef std::vector<rv_csr_field_ptr> rv_csr_field_list;
 typedef std::pair<rv_bitrange,size_t> rv_opcode_mask;
 typedef std::vector<rv_opcode_mask> rv_opcode_mask_list;
+typedef std::shared_ptr<rv_opcode_class> rv_opcode_class_ptr;
+typedef std::vector<rv_opcode_class_ptr> rv_opcode_class_list;
+typedef std::map<std::string,rv_opcode_class_ptr> rv_opcode_class_map;
+typedef std::shared_ptr<rv_opcode_major> rv_opcode_major_ptr;
+typedef std::vector<rv_opcode_major_ptr> rv_opcode_major_list;
 typedef std::shared_ptr<rv_opcode> rv_opcode_ptr;
 typedef std::vector<rv_opcode_ptr> rv_opcode_list;
 typedef std::shared_ptr<rv_constraint> rv_constraint_ptr;
@@ -140,19 +150,37 @@ struct rv_bitspec
 	std::string to_template();
 };
 
+struct rv_version : std::tuple<int,int,int>
+{
+	rv_version()
+		: rv_version(0) {}
+	rv_version(int x)
+		: std::tuple<int,int,int>(x, x, x) {}
+	rv_version(int major, int minor, int patchlevel)
+		: std::tuple<int,int,int>(major, minor, patchlevel) {}
+};
+
+struct rv_version_spec
+{
+	rv_version start;
+	rv_version end;
+
+	rv_version_spec()
+		: start(), end() {}
+	rv_version_spec(rv_version start, rv_version end)
+		: start(start), end(end) {}
+};
+
 struct rv_operand
 {
 	std::string name;
 	rv_bitspec bitspec;
 	std::string type;
 	std::string label;
-	std::string fg_color;
-	std::string bg_color;
 
 	rv_operand(std::string name, std::string bitspec, std::string type,
-		  std::string label, std::string fg_color, std::string bg_color)
-		: name(name), bitspec(bitspec), type(type),
-		  label(label), fg_color(fg_color), bg_color(bg_color) {}
+		  std::string label)
+		: name(name), bitspec(bitspec), type(type), label(label) {}
 
 	std::string char_code() {
 		if (type == "ireg") return "R";
@@ -164,6 +192,32 @@ struct rv_operand
 		else if (type == "offset") return "O";
 		else return "?";
 	}
+
+	std::string fg_color() {
+		if (name.find("rd") != std::string::npos ||
+			name.find("rs1") != std::string::npos ||
+			name.find("rs2") != std::string::npos ||
+			name.find("rs2") != std::string::npos)
+		{
+			return "white";
+		} else {
+			return "green";
+		}
+	}
+
+	std::string bg_color() {
+		if (name.find("rd") != std::string::npos) {
+			return "magenta";
+		} else if (name.find("rs1") != std::string::npos) {
+			return "cyan";
+		} else if (name.find("rs2") != std::string::npos) {
+			return "green";
+		} else if (name.find("rs3") != std::string::npos) {
+			return "yellow";
+		} else {
+			return "none";
+		}
+	}
 };
 
 struct rv_enum
@@ -172,9 +226,10 @@ struct rv_enum
 	std::string name;
 	int64_t value;
 	std::string description;
+	rv_version_spec version;
 
-	rv_enum(std::string group, std::string name, std::string value, std::string description)
-		: group(group), name(name), value(rv_parse_value(value.c_str())), description(description) {}
+	rv_enum(std::string group, std::string name, std::string value, std::string description, rv_version_spec version)
+		: group(group), name(name), value(rv_parse_value(value.c_str())), description(description), version(version) {}
 };
 
 struct rv_type
@@ -249,9 +304,37 @@ struct rv_csr
 	std::string access;
 	std::string name;
 	std::string description;
+	rv_version_spec version;
 
-	rv_csr(std::string number, std::string access, std::string name, std::string description)
-		: number(number), access(access), name(name), description(description) {}
+	rv_csr(std::string number, std::string access, std::string name, std::string description, rv_version_spec version)
+		: number(number), access(access), name(name), description(description), version(version) {}
+};
+
+struct rv_csr_field
+{
+	std::string name;
+	std::string field;
+	rv_bitspec bitspec;
+	std::string modes;
+	std::string description;
+	rv_version_spec version;
+
+	rv_csr_field(std::string name, std::string field, rv_bitspec bitspec, std::string modes, std::string description, rv_version_spec version)
+		: name(name), field(field), bitspec(bitspec), modes(modes), description(description), version(version) {}
+};
+
+struct rv_opcode_major
+{
+	rv_opcode_mask_list masks;
+	std::string name;
+};
+
+struct rv_opcode_class
+{
+	std::string name;
+	rv_opcode_list opcodes;
+
+	rv_opcode_class(std::string name) : name(name) {}
 };
 
 struct rv_opcode
@@ -262,6 +345,7 @@ struct rv_opcode
 	std::string pseudocode_c;
 	std::string pseudocode_alt;
 	rv_operand_list operands;
+	rv_opcode_class_list classes;
 	rv_opcode_mask_list masks;
 	rv_codec_ptr codec;
 	rv_format_ptr format;
@@ -367,6 +451,10 @@ struct rv_meta_model
 	rv_register_map       registers_by_name;
 	rv_csr_list           csrs;
 	rv_csr_map            csrs_by_name;
+	rv_csr_field_list     csr_fields;
+	rv_opcode_major_list  opcode_majors;
+	rv_opcode_class_list  opcode_classes;
+	rv_opcode_class_map   opcode_classes_byname;
 	rv_opcode_list        opcodes;
 	rv_opcode_list        all_opcodes;
 	rv_opcode_list_map    opcodes_by_name;
@@ -377,7 +465,8 @@ struct rv_meta_model
 	rv_pseudo_map         pseudos_by_name;
 
 	static rv_opcode_mask decode_mask(std::string bit_spec);
-	static std::string opcode_mask(rv_opcode_ptr opcode);
+	static rv_version decode_version(std::string version, rv_version default_version);
+	static rv_version_spec decode_version_spec(std::string version_spec);
 	static std::string format_type(rv_operand_ptr operand);
 	static std::string format_codec(std::string prefix, rv_codec_ptr codec, std::string dot, bool strip_suffix = true);
 	static std::string format_format(std::string prefix, rv_format_ptr format, char special);
@@ -414,10 +503,13 @@ struct rv_meta_model
 	void parse_format(std::vector<std::string> &part);
 	void parse_register(std::vector<std::string> &part);
 	void parse_csr(std::vector<std::string> &part);
+	void parse_csr_field(std::vector<std::string> &part);
+	void parse_opcode_major(std::vector<std::string> &part);
 	void parse_opcode(std::vector<std::string> &part);
 	void parse_constraint(std::vector<std::string> &part);
 	void parse_compression(std::vector<std::string> &part);
 	void parse_pseudo(std::vector<std::string> &part);
+	void parse_opcode_classes(std::vector<std::string> &part);
 	void parse_opcode_fullname(std::vector<std::string> &part);
 	void parse_opcode_description(std::vector<std::string> &part);
 	void parse_opcode_pseudocode_c(std::vector<std::string> &part);
